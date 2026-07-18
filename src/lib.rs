@@ -21,14 +21,15 @@ pub mod ir_eval;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod property;
 pub mod text_ir;
 pub mod value;
 pub mod verify;
 
 use crate::expand::ExpansionContext;
 
-pub use ast::Expr;
-pub use core::CoreExpr;
+pub use ast::{Expr, ExprKind};
+pub use core::{CoreExpr, CoreExprKind};
 pub use error::{
     BackendError, EvalError, ExpandError, FormatError, LexError, LispError, LowerError, ParseError,
     VerifyError,
@@ -38,6 +39,7 @@ pub use globals::{GlobalRegistry, GlobalStore, RuntimeConstants};
 pub use interpreter::{FrontendSession, Interpreter};
 pub use ir::IrModule;
 pub use lexer::{SpannedToken, Token};
+pub use property::{Properties, PropertyValue};
 pub use value::{Builtin, Closure, Value};
 
 pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LispError> {

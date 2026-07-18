@@ -26,10 +26,10 @@ impl Parser {
     fn parse_expr(&mut self) -> Result<Expr, LispError> {
         let spanned = self.next().ok_or(ParseError::UnexpectedEof)?;
         match spanned.token {
-            Token::Int(n) => Ok(Expr::Int(n)),
-            Token::Bool(b) => Ok(Expr::Bool(b)),
-            Token::String(s) => Ok(Expr::String(s)),
-            Token::Symbol(s) => Ok(Expr::Symbol(s)),
+            Token::Int(n) => Ok(Expr::int(n)),
+            Token::Bool(b) => Ok(Expr::bool(b)),
+            Token::String(s) => Ok(Expr::string(s)),
+            Token::Symbol(s) => Ok(Expr::symbol(s)),
             Token::LParen => self.parse_list(),
             Token::RParen => Err(LispError::Parse(ParseError::UnmatchedCloseParen {
                 span: spanned.span,
@@ -48,7 +48,7 @@ impl Parser {
                 }
                 Some(spanned) if spanned.token == Token::RParen => {
                     self.next();
-                    return Ok(Expr::List(items));
+                    return Ok(Expr::list(items));
                 }
                 _ => items.push(self.parse_expr()?),
             }
@@ -93,14 +93,10 @@ mod tests {
         let expr = parse_one("(+ 1 (* 2 3))").expect("should parse");
         assert_eq!(
             expr,
-            Expr::List(vec![
-                Expr::Symbol("+".to_string()),
-                Expr::Int(1),
-                Expr::List(vec![
-                    Expr::Symbol("*".to_string()),
-                    Expr::Int(2),
-                    Expr::Int(3),
-                ]),
+            Expr::list(vec![
+                Expr::symbol("+"),
+                Expr::int(1),
+                Expr::list(vec![Expr::symbol("*"), Expr::int(2), Expr::int(3),]),
             ])
         );
     }
@@ -108,7 +104,7 @@ mod tests {
     #[test]
     fn parses_empty_list() {
         let expr = parse_one("()").expect("should parse");
-        assert_eq!(expr, Expr::List(vec![]));
+        assert_eq!(expr, Expr::list(vec![]));
     }
 
     #[test]

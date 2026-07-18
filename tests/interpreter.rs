@@ -74,14 +74,10 @@ fn parser_builds_expected_structure() {
     let expr = parse_one("(+ 1 (* 2 3))").expect("should parse");
     assert_eq!(
         expr,
-        Expr::List(vec![
-            Expr::Symbol("+".to_string()),
-            Expr::Int(1),
-            Expr::List(vec![
-                Expr::Symbol("*".to_string()),
-                Expr::Int(2),
-                Expr::Int(3),
-            ]),
+        Expr::list(vec![
+            Expr::symbol("+"),
+            Expr::int(1),
+            Expr::list(vec![Expr::symbol("*"), Expr::int(2), Expr::int(3),]),
         ])
     );
 }

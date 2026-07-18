@@ -8,8 +8,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::Expr;
-use crate::core::CoreExpr;
+use crate::ast::{Expr, ExprKind};
+use crate::core::{CoreExpr, CoreExprKind};
 use crate::error::ExpandError;
 
 /// What the expander may consult to resolve a global name to a known
@@ -83,27 +83,51 @@ impl<'a> ExpansionContext<'a> {
 /// are unrolled here; every other form is copied structurally, with nested
 /// subexpressions expanded recursively.
 pub fn expand(expr: &Expr, context: &ExpansionContext) -> Result<CoreExpr, ExpandError> {
-    match expr {
-        Expr::Int(n) => Ok(CoreExpr::Int(*n)),
-        Expr::Bool(b) => Ok(CoreExpr::Bool(*b)),
-        Expr::String(s) => Ok(CoreExpr::String(s.clone())),
-        Expr::Symbol(name) => Ok(CoreExpr::Symbol(name.clone())),
-        Expr::List(items) => expand_list(items, context),
+    match expr.kind() {
+        ExprKind::Int(n) => Ok(CoreExpr::with_properties(
+            CoreExprKind::Int(*n),
+            expr.properties().clone(),
+        )),
+        ExprKind::Bool(b) => Ok(CoreExpr::with_properties(
+            CoreExprKind::Bool(*b),
+            expr.properties().clone(),
+        )),
+        ExprKind::String(s) => Ok(CoreExpr::with_properties(
+            CoreExprKind::String(s.clone()),
+            expr.properties().clone(),
+        )),
+        ExprKind::Symbol(name) => Ok(CoreExpr::with_properties(
+            CoreExprKind::Symbol(name.clone()),
+            expr.properties().clone(),
+        )),
+        ExprKind::List(items) => expand_list(expr, items, context),
     }
 }
 
-fn expand_list(items: &[Expr], context: &ExpansionContext) -> Result<CoreExpr, ExpandError> {
-    if let Some(Expr::Symbol(name)) = items.first()
+fn expand_list(
+    source: &Expr,
+    items: &[Expr],
+    context: &ExpansionContext,
+) -> Result<CoreExpr, ExpandError> {
+    if let Some(first) = items.first()
+        && let ExprKind::Symbol(name) = first.kind()
         && name == "for"
     {
-        return expand_for(&items[1..], context);
+        let result = expand_for(&items[1..], context)?;
+        return Ok(CoreExpr::with_properties(
+            result.kind().clone(),
+            source.properties().clone(),
+        ));
     }
 
     let mut expanded = Vec::with_capacity(items.len());
     for item in items {
         expanded.push(expand(item, context)?);
     }
-    Ok(CoreExpr::List(expanded))
+    Ok(CoreExpr::with_properties(
+        CoreExprKind::List(expanded),
+        source.properties().clone(),
+    ))
 }
 
 /// `(for (name start end [step]) body)`
@@ -112,7 +136,7 @@ fn expand_for(rest: &[Expr], context: &ExpansionContext) -> Result<CoreExpr, Exp
         return Err(ExpandError::InvalidForSyntax);
     };
 
-    let Expr::List(binding_items) = binding_expr else {
+    let ExprKind::List(binding_items) = binding_expr.kind() else {
         return Err(ExpandError::InvalidForBinding);
     };
 
@@ -122,7 +146,7 @@ fn expand_for(rest: &[Expr], context: &ExpansionContext) -> Result<CoreExpr, Exp
         _ => return Err(ExpandError::InvalidForBinding),
     };
 
-    let Expr::Symbol(var_name) = name else {
+    let ExprKind::Symbol(var_name) = name.kind() else {
         return Err(ExpandError::InvalidForBinding);
     };
 
@@ -149,11 +173,11 @@ fn expand_for(rest: &[Expr], context: &ExpansionContext) -> Result<CoreExpr, Exp
     for _ in 0..iterations {
         let iter_context = context.child_with_for_var(var_name, current);
         let core_body = expand(body, &iter_context)?;
-        sequence.push(CoreExpr::List(vec![
-            CoreExpr::Symbol("let".to_string()),
-            CoreExpr::List(vec![CoreExpr::List(vec![
-                CoreExpr::Symbol(var_name.clone()),
-                CoreExpr::Int(current),
+        sequence.push(CoreExpr::list(vec![
+            CoreExpr::symbol("let"),
+            CoreExpr::list(vec![CoreExpr::list(vec![
+                CoreExpr::symbol(var_name.clone()),
+                CoreExpr::int(current),
             ])]),
             core_body,
         ]));
@@ -162,7 +186,7 @@ fn expand_for(rest: &[Expr], context: &ExpansionContext) -> Result<CoreExpr, Exp
         current += step;
     }
 
-    Ok(CoreExpr::Sequence(sequence))
+    Ok(CoreExpr::sequence(sequence))
 }
 
 /// Computes the iteration count for a half-open `[start, end)` range with
@@ -197,11 +221,11 @@ fn compute_iterations(start: i64, end: i64, step: i64) -> usize {
 /// `loop`, user function calls, runtime locals) is rejected so `for`'s
 /// range can never depend on a runtime value.
 fn eval_constant_int(expr: &Expr, context: &ExpansionContext) -> Result<i64, ExpandError> {
-    match expr {
-        Expr::Int(n) => Ok(*n),
-        Expr::Bool(_) => Err(ExpandError::NonConstantForBound),
-        Expr::String(_) => Err(ExpandError::NonIntegerForBound),
-        Expr::Symbol(name) => {
+    match expr.kind() {
+        ExprKind::Int(n) => Ok(*n),
+        ExprKind::Bool(_) => Err(ExpandError::NonConstantForBound),
+        ExprKind::String(_) => Err(ExpandError::NonIntegerForBound),
+        ExprKind::Symbol(name) => {
             if let Some(&value) = context.for_vars.get(name) {
                 return Ok(value);
             }
@@ -210,7 +234,7 @@ fn eval_constant_int(expr: &Expr, context: &ExpansionContext) -> Result<i64, Exp
                 .integer_constant(name)
                 .ok_or(ExpandError::NonConstantForBound)
         }
-        Expr::List(items) => eval_constant_application(items, context),
+        ExprKind::List(items) => eval_constant_application(items, context),
     }
 }
 
@@ -218,7 +242,10 @@ fn eval_constant_application(
     items: &[Expr],
     context: &ExpansionContext,
 ) -> Result<i64, ExpandError> {
-    let [Expr::Symbol(op), lhs, rhs] = items else {
+    let [op, lhs, rhs] = items else {
+        return Err(ExpandError::NonConstantForBound);
+    };
+    let ExprKind::Symbol(op) = op.kind() else {
         return Err(ExpandError::NonConstantForBound);
     };
     if !matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
@@ -288,10 +315,10 @@ mod tests {
         let core = expand_source("(+ 1 2)").unwrap();
         assert_eq!(
             core,
-            CoreExpr::List(vec![
-                CoreExpr::Symbol("+".to_string()),
-                CoreExpr::Int(1),
-                CoreExpr::Int(2),
+            CoreExpr::list(vec![
+                CoreExpr::symbol("+"),
+                CoreExpr::int(1),
+                CoreExpr::int(2),
             ])
         );
     }
@@ -299,7 +326,7 @@ mod tests {
     #[test]
     fn for_expands_to_sequence_of_let_wrapped_iterations() {
         let core = expand_source("(for (i 0 3) i)").unwrap();
-        let CoreExpr::Sequence(iterations) = core else {
+        let CoreExprKind::Sequence(iterations) = core.kind() else {
             panic!("expected Sequence");
         };
         assert_eq!(iterations.len(), 3);
@@ -308,13 +335,13 @@ mod tests {
     #[test]
     fn for_zero_iterations_is_empty_sequence() {
         let core = expand_source("(for (i 4 0) i)").unwrap();
-        assert_eq!(core, CoreExpr::Sequence(vec![]));
+        assert_eq!(core, CoreExpr::sequence(vec![]));
     }
 
     #[test]
     fn for_negative_step() {
         let core = expand_source("(for (i 4 0 -1) i)").unwrap();
-        let CoreExpr::Sequence(iterations) = core else {
+        let CoreExprKind::Sequence(iterations) = core.kind() else {
             panic!("expected Sequence");
         };
         assert_eq!(iterations.len(), 4);
@@ -323,7 +350,7 @@ mod tests {
     #[test]
     fn for_constant_expression_bound() {
         let core = expand_source("(for (i 0 (+ 2 2)) i)").unwrap();
-        let CoreExpr::Sequence(iterations) = core else {
+        let CoreExprKind::Sequence(iterations) = core.kind() else {
             panic!("expected Sequence");
         };
         assert_eq!(iterations.len(), 4);
@@ -374,7 +401,7 @@ mod tests {
         let expr = parse_one("(for (x 0 3) (for (y 0 (+ x 1)) y))").unwrap();
         let context = ExpansionContext::new(&constants);
         let core = expand(&expr, &context).unwrap();
-        let CoreExpr::Sequence(outer) = core else {
+        let CoreExprKind::Sequence(outer) = core.kind() else {
             panic!("expected Sequence");
         };
         assert_eq!(outer.len(), 3);
@@ -386,9 +413,46 @@ mod tests {
         let expr = parse_one("(for (i 0 count) i)").unwrap();
         let context = ExpansionContext::new(&constants);
         let core = expand(&expr, &context).unwrap();
-        let CoreExpr::Sequence(iterations) = core else {
+        let CoreExprKind::Sequence(iterations) = core.kind() else {
             panic!("expected Sequence");
         };
         assert_eq!(iterations.len(), 3);
+    }
+
+    #[test]
+    fn expansion_preserves_source_properties_without_copying_to_children() {
+        use crate::property::PropertyValue;
+
+        let source = Expr::list(vec![Expr::symbol("+"), Expr::int(1)])
+            .with_property("width", PropertyValue::Int(8));
+        let constants = TestConstants::default();
+        let core = expand(&source, &ExpansionContext::new(&constants)).unwrap();
+        assert_eq!(core.properties().get("width"), Some(&PropertyValue::Int(8)));
+        let CoreExprKind::List(items) = core.kind() else {
+            panic!("expected list");
+        };
+        assert!(items.iter().all(|item| item.properties().is_empty()));
+    }
+
+    #[test]
+    fn for_attaches_its_properties_only_to_the_replacement_sequence() {
+        use crate::property::PropertyValue;
+
+        let source = Expr::list(vec![
+            Expr::symbol("for"),
+            Expr::list(vec![Expr::symbol("i"), Expr::int(0), Expr::int(1)]),
+            Expr::symbol("i"),
+        ])
+        .with_property("unroll", PropertyValue::Bool(true));
+        let constants = TestConstants::default();
+        let core = expand(&source, &ExpansionContext::new(&constants)).unwrap();
+        assert_eq!(
+            core.properties().get("unroll"),
+            Some(&PropertyValue::Bool(true))
+        );
+        let CoreExprKind::Sequence(items) = core.kind() else {
+            panic!("expected sequence");
+        };
+        assert!(items.iter().all(|item| item.properties().is_empty()));
     }
 }

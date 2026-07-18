@@ -712,7 +712,9 @@ fn verify_rejects_duplicate_loop_id_in_nested_range_loops() {
     let result = regatelisp::verify_top_level(&top_level, &module, &globals);
     assert!(matches!(
         result,
-        Err(regatelisp::LispError::Verify(VerifyError::DuplicateLoopId(_)))
+        Err(regatelisp::LispError::Verify(VerifyError::DuplicateLoopId(
+            _
+        )))
     ));
 }
 

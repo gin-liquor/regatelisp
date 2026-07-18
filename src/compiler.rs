@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::Expr;
+use crate::ast::{Expr, ExprKind};
 use crate::core::CoreExpr;
 use crate::error::LispError;
 use crate::expand::{self, ExpansionContext, ForConstantSource};
@@ -76,21 +76,21 @@ const FOLDABLE_BUILTIN_ARITHMETIC: &[&str] = &["+", "-", "*", "/", "%"];
 /// that means (e.g. `for` still errors, but a `def` simply isn't recorded
 /// as a constant).
 fn try_fold_int(expr: &Expr, env: &ConstantEnv, locals: &HashMap<String, i64>) -> Option<i64> {
-    match expr {
-        Expr::Int(n) => Some(*n),
-        Expr::Bool(_) | Expr::String(_) => None,
-        Expr::Symbol(name) => locals
+    match expr.kind() {
+        ExprKind::Int(n) => Some(*n),
+        ExprKind::Bool(_) | ExprKind::String(_) => None,
+        ExprKind::Symbol(name) => locals
             .get(name)
             .copied()
             .or_else(|| env.integer_constant(name)),
-        Expr::List(items) => try_fold_application(items, env, locals),
+        ExprKind::List(items) => try_fold_application(items, env, locals),
     }
 }
 
 fn try_fold_bool(expr: &Expr, env: &ConstantEnv, locals: &HashMap<String, i64>) -> Option<bool> {
-    match expr {
-        Expr::Bool(b) => Some(*b),
-        Expr::List(items) => try_fold_bool_application(items, env, locals),
+    match expr.kind() {
+        ExprKind::Bool(b) => Some(*b),
+        ExprKind::List(items) => try_fold_bool_application(items, env, locals),
         _ => None,
     }
 }
@@ -100,7 +100,8 @@ fn try_fold_application(
     env: &ConstantEnv,
     locals: &HashMap<String, i64>,
 ) -> Option<i64> {
-    if let [Expr::Symbol(op), lhs, rhs] = items
+    if let [op_expr, lhs, rhs] = items
+        && let ExprKind::Symbol(op) = op_expr.kind()
         && FOLDABLE_BUILTIN_ARITHMETIC.contains(&op.as_str())
         && env.operator_is_foldable(op)
     {
@@ -115,17 +116,21 @@ fn try_fold_application(
             _ => None,
         };
     }
-    if let [Expr::Symbol(kw), bindings_expr, body] = items
+    if let [kw_expr, bindings_expr, body] = items
+        && let ExprKind::Symbol(kw) = kw_expr.kind()
         && kw == "let"
-        && let Expr::List(binding_exprs) = bindings_expr
+        && let ExprKind::List(binding_exprs) = bindings_expr.kind()
     {
         let mut new_locals = locals.clone();
         let mut computed = Vec::with_capacity(binding_exprs.len());
         for binding_expr in binding_exprs {
-            let Expr::List(pair) = binding_expr else {
+            let ExprKind::List(pair) = binding_expr.kind() else {
                 return None;
             };
-            let [Expr::Symbol(name), init] = pair.as_slice() else {
+            let [name_expr, init] = pair.as_slice() else {
+                return None;
+            };
+            let ExprKind::Symbol(name) = name_expr.kind() else {
                 return None;
             };
             computed.push((name.clone(), try_fold_int(init, env, locals)?));
@@ -135,7 +140,8 @@ fn try_fold_application(
         }
         return try_fold_int(body, env, &new_locals);
     }
-    if let [Expr::Symbol(kw), cond, yes, no] = items
+    if let [kw_expr, cond, yes, no] = items
+        && let ExprKind::Symbol(kw) = kw_expr.kind()
         && kw == "if"
     {
         let branch = if try_fold_bool(cond, env, locals)? {
@@ -153,7 +159,8 @@ fn try_fold_bool_application(
     env: &ConstantEnv,
     locals: &HashMap<String, i64>,
 ) -> Option<bool> {
-    if let [Expr::Symbol(op), lhs, rhs] = items
+    if let [op_expr, lhs, rhs] = items
+        && let ExprKind::Symbol(op) = op_expr.kind()
         && env.operator_is_foldable(op)
     {
         match op.as_str() {
@@ -173,7 +180,8 @@ fn try_fold_bool_application(
             _ => {}
         }
     }
-    if let [Expr::Symbol(kw), cond, yes, no] = items
+    if let [kw_expr, cond, yes, no] = items
+        && let ExprKind::Symbol(kw) = kw_expr.kind()
         && kw == "if"
     {
         let branch = if try_fold_bool(cond, env, locals)? {
@@ -264,8 +272,10 @@ impl Compiler {
         // Only a top-level `(def name expr)` whose right-hand side folds
         // to a known integer, purely from source shape, becomes a `for`
         // expansion-time constant for later top-level forms.
-        if let Expr::List(items) = expr
-            && let [Expr::Symbol(kw), Expr::Symbol(name), value_expr] = items.as_slice()
+        if let ExprKind::List(items) = expr.kind()
+            && let [kw_expr, name_expr, value_expr] = items.as_slice()
+            && let ExprKind::Symbol(kw) = kw_expr.kind()
+            && let ExprKind::Symbol(name) = name_expr.kind()
             && kw == "def"
         {
             // Any `def` might be shadowing a builtin operator name, so

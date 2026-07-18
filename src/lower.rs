@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use crate::capture::CaptureList;
-use crate::core::CoreExpr;
+use crate::core::{CoreExpr, CoreExprKind};
 use crate::error::{LowerError, Span};
 use crate::globals::GlobalRegistry;
 use crate::ids::{CaptureSlot, FunctionId, LocalSlot, LoopId};
@@ -248,8 +248,9 @@ pub fn lower_top_level(
 ) -> Result<(IrTopLevel, Vec<IrFunction>), LowerError> {
     let span = Span::new(0, 0);
 
-    if let CoreExpr::List(items) = core
-        && let Some(CoreExpr::Symbol(name)) = items.first()
+    if let CoreExprKind::List(items) = core.kind()
+        && let Some(first) = items.first()
+        && let CoreExprKind::Symbol(name) = first.kind()
         && name == "def"
     {
         let top_level = lower_def(&items[1..], context, span)?;
@@ -277,7 +278,7 @@ fn lower_def(
     let [name_expr, value_expr] = rest else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::Symbol(name) = name_expr else {
+    let CoreExprKind::Symbol(name) = name_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
     if RESERVED_DEF_NAMES.contains(&name.as_str()) {
@@ -309,22 +310,22 @@ fn lower_def(
 
 fn lower_expr(core: &CoreExpr, context: &mut LowerContext) -> Result<IrExpr, LowerError> {
     let span = Span::new(0, 0);
-    match core {
-        CoreExpr::Int(n) => Ok(IrExpr::new(span, IrExprKind::Const(IrConst::Int(*n)))),
-        CoreExpr::Bool(b) => Ok(IrExpr::new(span, IrExprKind::Const(IrConst::Bool(*b)))),
-        CoreExpr::String(s) => Ok(IrExpr::new(
+    match core.kind() {
+        CoreExprKind::Int(n) => Ok(IrExpr::new(span, IrExprKind::Const(IrConst::Int(*n)))),
+        CoreExprKind::Bool(b) => Ok(IrExpr::new(span, IrExprKind::Const(IrConst::Bool(*b)))),
+        CoreExprKind::String(s) => Ok(IrExpr::new(
             span,
             IrExprKind::Const(IrConst::String(s.clone())),
         )),
-        CoreExpr::Symbol(name) => lower_symbol(name, context, span),
-        CoreExpr::Sequence(items) => {
+        CoreExprKind::Symbol(name) => lower_symbol(name, context, span),
+        CoreExprKind::Sequence(items) => {
             let mut lowered = Vec::with_capacity(items.len());
             for item in items {
                 lowered.push(lower_expr(item, context)?);
             }
             Ok(IrExpr::new(span, IrExprKind::Sequence(lowered)))
         }
-        CoreExpr::List(items) => lower_list(items, context, span),
+        CoreExprKind::List(items) => lower_list(items, context, span),
     }
 }
 
@@ -365,7 +366,7 @@ fn lower_list(
         ));
     }
 
-    if let CoreExpr::Symbol(name) = &items[0] {
+    if let CoreExprKind::Symbol(name) = items[0].kind() {
         match name.as_str() {
             "fn" => return lower_fn(&items[1..], context, span),
             "let" => return lower_let(&items[1..], context, span),
@@ -399,7 +400,7 @@ fn lower_fn(
     let [params_expr, body_expr] = rest else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(param_exprs) = params_expr else {
+    let CoreExprKind::List(param_exprs) = params_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
 
@@ -408,7 +409,7 @@ fn lower_fn(
 
     let mut param_names = Vec::with_capacity(param_exprs.len());
     for param_expr in param_exprs {
-        let CoreExpr::Symbol(param_name) = param_expr else {
+        let CoreExprKind::Symbol(param_name) = param_expr.kind() else {
             context.function_stack.pop();
             return Err(LowerError::InvalidCoreForm);
         };
@@ -460,20 +461,20 @@ fn lower_let(
     let [bindings_expr, body_expr] = rest else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(binding_exprs) = bindings_expr else {
+    let CoreExprKind::List(binding_exprs) = bindings_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
 
     let mut names = Vec::with_capacity(binding_exprs.len());
     let mut initializers = Vec::with_capacity(binding_exprs.len());
     for binding_expr in binding_exprs {
-        let CoreExpr::List(pair) = binding_expr else {
+        let CoreExprKind::List(pair) = binding_expr.kind() else {
             return Err(LowerError::InvalidCoreForm);
         };
         let [name_expr, init_expr] = pair.as_slice() else {
             return Err(LowerError::InvalidCoreForm);
         };
-        let CoreExpr::Symbol(name) = name_expr else {
+        let CoreExprKind::Symbol(name) = name_expr.kind() else {
             return Err(LowerError::InvalidCoreForm);
         };
         if names.contains(name) {
@@ -557,9 +558,9 @@ fn lower_loop(
 ) -> Result<IrExpr, LowerError> {
     let is_general = rest.len() == 4
         && matches!(
-            &rest[1],
-            CoreExpr::List(x)
-                if x.len() == 2 && matches!(&x[0], CoreExpr::Symbol(s) if s == "while")
+            rest[1].kind(),
+            CoreExprKind::List(x)
+                if x.len() == 2 && matches!(x[0].kind(), CoreExprKind::Symbol(s) if s == "while")
         );
     if is_general {
         lower_general_loop(rest, context, span)
@@ -576,7 +577,7 @@ fn lower_range_loop(
     let [binding_expr, body_expr] = rest else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(binding_items) = binding_expr else {
+    let CoreExprKind::List(binding_items) = binding_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
     let (name, start_expr, end_expr, step_expr) = match binding_items.as_slice() {
@@ -584,7 +585,7 @@ fn lower_range_loop(
         [name, start, end, step] => (name, start, end, Some(step)),
         _ => return Err(LowerError::InvalidCoreForm),
     };
-    let CoreExpr::Symbol(var_name) = name else {
+    let CoreExprKind::Symbol(var_name) = name.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
 
@@ -627,16 +628,16 @@ fn lower_general_loop(
     span: Span,
 ) -> Result<IrExpr, LowerError> {
     let (states_expr, while_expr, next_expr, do_expr) = (&rest[0], &rest[1], &rest[2], &rest[3]);
-    let CoreExpr::List(state_items) = states_expr else {
+    let CoreExprKind::List(state_items) = states_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(w) = while_expr else {
+    let CoreExprKind::List(w) = while_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(n) = next_expr else {
+    let CoreExprKind::List(n) = next_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(d) = do_expr else {
+    let CoreExprKind::List(d) = do_expr.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
     let [_, cond_core] = w.as_slice() else {
@@ -648,7 +649,7 @@ fn lower_general_loop(
     let [_, body_core] = d.as_slice() else {
         return Err(LowerError::InvalidCoreForm);
     };
-    let CoreExpr::List(update_items) = next_states else {
+    let CoreExprKind::List(update_items) = next_states.kind() else {
         return Err(LowerError::InvalidCoreForm);
     };
 
@@ -657,10 +658,13 @@ fn lower_general_loop(
     let mut names = Vec::with_capacity(state_items.len());
     let mut initializer_irs = Vec::with_capacity(state_items.len());
     for item in state_items {
-        let CoreExpr::List(pair) = item else {
+        let CoreExprKind::List(pair) = item.kind() else {
             return Err(LowerError::InvalidCoreForm);
         };
-        let [CoreExpr::Symbol(name), init] = pair.as_slice() else {
+        let [name_expr, init] = pair.as_slice() else {
+            return Err(LowerError::InvalidCoreForm);
+        };
+        let CoreExprKind::Symbol(name) = name_expr.kind() else {
             return Err(LowerError::InvalidCoreForm);
         };
         if names.contains(name) {
@@ -694,10 +698,13 @@ fn lower_general_loop(
         }
         let mut updates = Vec::with_capacity(update_items.len());
         for (update_item, expected_name) in update_items.iter().zip(names.iter()) {
-            let CoreExpr::List(pair) = update_item else {
+            let CoreExprKind::List(pair) = update_item.kind() else {
                 return Err(LowerError::InvalidCoreForm);
             };
-            let [CoreExpr::Symbol(n), value_core] = pair.as_slice() else {
+            let [name_expr, value_core] = pair.as_slice() else {
+                return Err(LowerError::InvalidCoreForm);
+            };
+            let CoreExprKind::Symbol(n) = name_expr.kind() else {
                 return Err(LowerError::InvalidCoreForm);
             };
             if n != expected_name {
