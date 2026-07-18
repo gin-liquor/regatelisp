@@ -60,3 +60,51 @@ Use `falling` instead of `rising` for a negedge register. Resets are synchronous
 support active-high and active-low polarity, and take priority over enables. Register
 values are connected to output ports through ordinary `assign` forms. Asynchronous
 reset is not supported in Stage 4.
+
+Stage 4.5 lowers register expressions as fixed-width typed hardware values. An
+unannotated integer may use the surrounding register type, so `(next (+ count 1))`
+keeps an 8-bit `count` and emits `8'd1`; explicit `meta ((width N))` annotations
+remain checked rather than resized implicitly. Width extension and truncation are
+not performed.
+
+## SystemVerilog CLI (Stage 4.5b completion)
+
+Compile a hardware module from standard input with `--emit-systemverilog`:
+
+```powershell
+Get-Content -Raw examples/counter_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
+```
+
+The command writes only generated SystemVerilog to standard output, so it can be
+redirected directly to a file:
+
+```powershell
+Get-Content -Raw examples/counter_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog |
+    Set-Content -Encoding utf8 examples/counter_sv.sv
+```
+
+## Comparisons and hardware `if` (Stage 4.5c)
+
+Hardware expressions support `=`, `!=`, `<`, `<=`, `>`, and `>=`. Both operands
+must have the same width; an unannotated integer inherits the other operand's
+width. A comparison produces an unsigned 1-bit value.
+
+Hardware `if` is a value expression that emits a SystemVerilog conditional
+operator. Its condition must be 1-bit, and both branches must have the same type.
+The destination type is propagated into unannotated integer branches:
+
+```lisp
+(next
+  (if (= count 255)
+      0
+      (+ count 1)))
+```
+
+For a complete counter example:
+
+```powershell
+Get-Content -Raw examples/wrapping_counter_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
+```

@@ -6,25 +6,20 @@ use regatelisp::{Interpreter, Value};
 
 enum Mode {
     Run,
-    Quiet,
     DumpReader,
     DumpCore,
     DumpIr,
     Check,
+    EmitSystemVerilog,
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args();
-    let _program_name = args.next();
-    let first_arg = args.next();
-
-    let (mode, arg) = match first_arg.as_deref() {
-        Some("--quiet" | "-q") => (Mode::Quiet, args.next()),
-        Some("--dump-reader") => (Mode::DumpReader, args.next()),
-        Some("--dump-core") => (Mode::DumpCore, args.next()),
-        Some("--dump-ir") => (Mode::DumpIr, args.next()),
-        Some("--check") => (Mode::Check, args.next()),
-        other => (Mode::Run, other.map(str::to_string)),
+    let (mode, arg, quiet) = match parse_cli() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
     };
 
     let source = match arg {
@@ -40,12 +35,64 @@ fn main() -> ExitCode {
     };
 
     match mode {
-        Mode::Run | Mode::Quiet => run(&source, matches!(mode, Mode::Quiet)),
+        Mode::Run => run(&source, quiet),
         Mode::DumpReader => dump_reader(&source),
         Mode::DumpCore => dump_core(&source),
         Mode::DumpIr => dump_ir(&source),
         Mode::Check => check(&source),
+        Mode::EmitSystemVerilog => emit_systemverilog(&source),
     }
+}
+
+fn parse_cli() -> Result<(Mode, Option<String>, bool), String> {
+    let mut mode = Mode::Run;
+    let mut source = None;
+    let mut quiet = false;
+    let mut options = true;
+
+    for arg in std::env::args().skip(1) {
+        if options && arg == "--" {
+            options = false;
+            continue;
+        }
+        if options {
+            match arg.as_str() {
+                "--quiet" | "-q" => {
+                    quiet = true;
+                    continue;
+                }
+                "--dump-reader" => Mode::DumpReader,
+                "--dump-core" => Mode::DumpCore,
+                "--dump-ir" => Mode::DumpIr,
+                "--check" => Mode::Check,
+                "--emit-systemverilog" => Mode::EmitSystemVerilog,
+                option if option.starts_with('-') => {
+                    return Err(format!("unknown option: {option}"));
+                }
+                _ => {
+                    if source.replace(arg).is_some() {
+                        return Err("expected at most one source argument".to_string());
+                    }
+                    continue;
+                }
+            };
+            if !matches!(mode, Mode::Run) {
+                return Err("multiple output modes specified".to_string());
+            }
+            mode = match arg.as_str() {
+                "--dump-reader" => Mode::DumpReader,
+                "--dump-core" => Mode::DumpCore,
+                "--dump-ir" => Mode::DumpIr,
+                "--check" => Mode::Check,
+                "--emit-systemverilog" => Mode::EmitSystemVerilog,
+                _ => unreachable!("recognized CLI mode"),
+            };
+        } else if source.replace(arg).is_some() {
+            return Err("expected at most one source argument".to_string());
+        }
+    }
+
+    Ok((mode, source, quiet))
 }
 
 fn run(source: &str, quiet: bool) -> ExitCode {
@@ -152,6 +199,21 @@ fn check(source: &str) -> ExitCode {
     let mut compiler = Compiler::new();
     match compiler.compile_source(source) {
         Ok(_) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--emit-systemverilog`: compiles a hardware module and writes only the
+/// generated SystemVerilog to standard output.
+fn emit_systemverilog(source: &str) -> ExitCode {
+    match regatelisp::compile_systemverilog(source) {
+        Ok(systemverilog) => {
+            print!("{systemverilog}");
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             eprintln!("error: {err}");
             ExitCode::FAILURE
