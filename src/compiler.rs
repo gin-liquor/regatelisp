@@ -272,12 +272,7 @@ impl Compiler {
         // Only a top-level `(def name expr)` whose right-hand side folds
         // to a known integer, purely from source shape, becomes a `for`
         // expansion-time constant for later top-level forms.
-        if let ExprKind::List(items) = expr.kind()
-            && let [kw_expr, name_expr, value_expr] = items.as_slice()
-            && let ExprKind::Symbol(kw) = kw_expr.kind()
-            && let ExprKind::Symbol(name) = name_expr.kind()
-            && kw == "def"
-        {
+        if let Some((name, value_expr)) = top_level_def_parts(expr) {
             // Any `def` might be shadowing a builtin operator name, so
             // constant folding through that name as an operator is no
             // longer valid regardless of what this definition's value is.
@@ -297,6 +292,27 @@ impl Compiler {
 
     pub fn module(&self) -> &IrModule {
         &self.module
+    }
+}
+
+/// Finds a top-level `def` through any number of transparent `meta` wrappers.
+/// This keeps compile-only `for` constant tracking aligned with normal lowering.
+fn top_level_def_parts(expr: &Expr) -> Option<(&str, &Expr)> {
+    let ExprKind::List(items) = expr.kind() else {
+        return None;
+    };
+    match items.as_slice() {
+        [head, _, inner] if matches!(head.kind(), ExprKind::Symbol(name) if name == "meta") => {
+            top_level_def_parts(inner)
+        }
+        [head, name, value] if matches!(head.kind(), ExprKind::Symbol(keyword) if keyword == "def") =>
+        {
+            let ExprKind::Symbol(name) = name.kind() else {
+                return None;
+            };
+            Some((name, value))
+        }
+        _ => None,
     }
 }
 
@@ -353,5 +369,14 @@ mod tests {
         let mut compiler = Compiler::new();
         let result = compiler.compile_source(r#"(print "must-not-run\n")"#);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn metadata_wrapped_def_remains_a_for_constant() {
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_source("(meta ((origin generated)) (def count 3))")
+            .unwrap();
+        assert!(compiler.compile_source("(for (i 0 count) i)").is_ok());
     }
 }

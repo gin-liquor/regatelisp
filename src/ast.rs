@@ -1,4 +1,5 @@
 use crate::property::{Properties, PropertyValue};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
@@ -37,6 +38,15 @@ impl Expr {
     pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
         self.properties.get(key)
     }
+    pub fn property(&self, key: &str) -> Option<&PropertyValue> {
+        self.get_property(key)
+    }
+    pub fn has_property(&self, key: &str) -> bool {
+        self.get_property(key).is_some()
+    }
+    pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
+        self.properties.remove(key)
+    }
     pub fn set_property(
         &mut self,
         key: impl Into<String>,
@@ -62,6 +72,52 @@ impl Expr {
     }
     pub fn list(items: Vec<Self>) -> Self {
         Self::new(ExprKind::List(items))
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.properties.is_empty() {
+            write!(f, "(meta (")?;
+            for (index, (key, value)) in self.properties.iter().enumerate() {
+                if index != 0 {
+                    write!(f, " ")?;
+                }
+                write!(f, "({key} {value})")?;
+            }
+            write!(f, ") {})", self.kind_display())
+        } else {
+            write!(f, "{}", self.kind_display())
+        }
+    }
+}
+
+impl Expr {
+    fn kind_display(&self) -> ExprKindDisplay<'_> {
+        ExprKindDisplay(&self.kind)
+    }
+}
+
+struct ExprKindDisplay<'a>(&'a ExprKind);
+
+impl fmt::Display for ExprKindDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            ExprKind::Int(value) => write!(f, "{value}"),
+            ExprKind::Bool(value) => write!(f, "{value}"),
+            ExprKind::String(value) => write!(f, "{}", PropertyValue::String(value.clone())),
+            ExprKind::Symbol(value) => write!(f, "{value}"),
+            ExprKind::List(items) => {
+                write!(f, "(")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, ")")
+            }
+        }
     }
 }
 

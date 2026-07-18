@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::ast::{Expr, ExprKind};
 use crate::core::{CoreExpr, CoreExprKind};
 use crate::error::ExpandError;
+use crate::property::{Properties, PropertyValue};
 
 /// What the expander may consult to resolve a global name to a known
 /// integer constant. Implemented by the runtime `GlobalStore` (paired with
@@ -111,13 +112,17 @@ fn expand_list(
 ) -> Result<CoreExpr, ExpandError> {
     if let Some(first) = items.first()
         && let ExprKind::Symbol(name) = first.kind()
-        && name == "for"
     {
-        let result = expand_for(&items[1..], context)?;
-        return Ok(CoreExpr::with_properties(
-            result.kind().clone(),
-            source.properties().clone(),
-        ));
+        if name == "meta" {
+            return expand_meta(source, &items[1..], context);
+        }
+        if name == "for" {
+            let result = expand_for(&items[1..], context)?;
+            return Ok(CoreExpr::with_properties(
+                result.kind().clone(),
+                source.properties().clone(),
+            ));
+        }
     }
 
     let mut expanded = Vec::with_capacity(items.len());
@@ -128,6 +133,49 @@ fn expand_list(
         CoreExprKind::List(expanded),
         source.properties().clone(),
     ))
+}
+
+/// `(meta ((key value) ...) expression)` attaches inert syntax properties
+/// to its expanded expression. Inner properties win when metadata is nested.
+fn expand_meta(
+    source: &Expr,
+    rest: &[Expr],
+    context: &ExpansionContext,
+) -> Result<CoreExpr, ExpandError> {
+    let [property_list, expression] = rest else {
+        return Err(ExpandError::InvalidMetaSyntax);
+    };
+    let properties = parse_meta_properties(property_list)?;
+    let mut core = expand(expression, context)?;
+    core.properties_mut().merge_missing_from(&properties);
+    core.properties_mut()
+        .merge_missing_from(source.properties());
+    Ok(core)
+}
+
+fn parse_meta_properties(expression: &Expr) -> Result<Properties, ExpandError> {
+    let ExprKind::List(entries) = expression.kind() else {
+        return Err(ExpandError::MetaPropertiesNotList);
+    };
+    let mut properties = Properties::new();
+    for entry in entries {
+        let ExprKind::List(pair) = entry.kind() else {
+            return Err(ExpandError::InvalidMetaProperty);
+        };
+        let [key, value] = pair.as_slice() else {
+            return Err(ExpandError::InvalidMetaProperty);
+        };
+        let ExprKind::Symbol(key) = key.kind() else {
+            return Err(ExpandError::InvalidMetaPropertyKey);
+        };
+        if properties
+            .insert(key.clone(), PropertyValue::from_expr(value))
+            .is_some()
+        {
+            return Err(ExpandError::DuplicatePropertyKey(key.clone()));
+        }
+    }
+    Ok(properties)
 }
 
 /// `(for (name start end [step]) body)`

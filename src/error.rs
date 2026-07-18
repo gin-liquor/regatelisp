@@ -245,6 +245,11 @@ impl fmt::Display for FormatError {
 /// expressions (currently, only `for` requires expansion).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandError {
+    InvalidMetaSyntax,
+    MetaPropertiesNotList,
+    InvalidMetaProperty,
+    InvalidMetaPropertyKey,
+    DuplicatePropertyKey(String),
     InvalidForSyntax,
     InvalidForBinding,
     NonConstantForBound,
@@ -259,6 +264,13 @@ pub enum ExpandError {
 impl fmt::Display for ExpandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ExpandError::InvalidMetaSyntax => write!(f, "malformed meta expression"),
+            ExpandError::MetaPropertiesNotList => write!(f, "meta properties must be a list"),
+            ExpandError::InvalidMetaProperty => {
+                write!(f, "each meta property must be a two-element list")
+            }
+            ExpandError::InvalidMetaPropertyKey => write!(f, "meta property keys must be symbols"),
+            ExpandError::DuplicatePropertyKey(key) => write!(f, "duplicate property key: {key}"),
             ExpandError::InvalidForSyntax => write!(f, "malformed for expression"),
             ExpandError::InvalidForBinding => write!(f, "malformed for binding"),
             ExpandError::NonConstantForBound => write!(

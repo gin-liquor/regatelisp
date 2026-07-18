@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::fmt;
+
+use crate::ast::{Expr, ExprKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertyValue {
@@ -7,6 +10,49 @@ pub enum PropertyValue {
     String(String),
     Symbol(String),
     List(Vec<PropertyValue>),
+}
+
+impl PropertyValue {
+    /// Converts reader syntax into inert property data; lists are never evaluated.
+    pub fn from_expr(expr: &Expr) -> Self {
+        match expr.kind() {
+            ExprKind::Int(value) => Self::Int(*value),
+            ExprKind::Bool(value) => Self::Bool(*value),
+            ExprKind::String(value) => Self::String(value.clone()),
+            ExprKind::Symbol(value) => Self::Symbol(value.clone()),
+            ExprKind::List(items) => Self::List(items.iter().map(Self::from_expr).collect()),
+        }
+    }
+}
+
+impl fmt::Display for PropertyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Int(value) => write!(f, "{value}"),
+            Self::Bool(value) => write!(f, "{value}"),
+            Self::String(value) => write!(f, "\"{}\"", escape_string(value)),
+            Self::Symbol(value) => write!(f, "{value}"),
+            Self::List(items) => {
+                write!(f, "(")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+fn escape_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,6 +89,15 @@ impl Properties {
     pub fn with(mut self, key: impl Into<String>, value: PropertyValue) -> Self {
         self.insert(key, value);
         self
+    }
+
+    /// Adds only keys not already present, preserving explicit inner metadata.
+    pub fn merge_missing_from(&mut self, outer: &Self) {
+        for (key, value) in outer.iter() {
+            self.entries
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
     }
 }
 

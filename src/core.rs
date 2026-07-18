@@ -1,4 +1,4 @@
-use crate::property::Properties;
+use crate::property::{Properties, PropertyValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreExpr {
@@ -34,6 +34,25 @@ impl CoreExpr {
     }
     pub fn properties_mut(&mut self) -> &mut Properties {
         &mut self.properties
+    }
+    pub fn get_property(&self, key: &str) -> Option<&PropertyValue> {
+        self.properties.get(key)
+    }
+    pub fn property(&self, key: &str) -> Option<&PropertyValue> {
+        self.get_property(key)
+    }
+    pub fn has_property(&self, key: &str) -> bool {
+        self.get_property(key).is_some()
+    }
+    pub fn set_property(
+        &mut self,
+        key: impl Into<String>,
+        value: PropertyValue,
+    ) -> Option<PropertyValue> {
+        self.properties.insert(key, value)
+    }
+    pub fn remove_property(&mut self, key: &str) -> Option<PropertyValue> {
+        self.properties.remove(key)
     }
     pub fn int(n: i64) -> Self {
         Self::new(CoreExprKind::Int(n))

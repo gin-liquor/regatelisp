@@ -14,6 +14,7 @@ pub mod error;
 pub mod expand;
 pub mod format;
 pub mod globals;
+pub mod hardware;
 pub mod ids;
 pub mod interpreter;
 pub mod ir;
@@ -41,6 +42,12 @@ pub use ir::IrModule;
 pub use lexer::{SpannedToken, Token};
 pub use property::{Properties, PropertyValue};
 pub use value::{Builtin, Closure, Value};
+
+pub fn compile_systemverilog(source: &str) -> Result<String, hardware::HardwareError> {
+    let expressions = parse_program(source).map_err(|_| hardware::HardwareError::InvalidModule)?;
+    let design = hardware::lower_hardware_design(&expressions)?;
+    hardware::emit_systemverilog(&design)
+}
 
 pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LispError> {
     Ok(lexer::tokenize(source)?)
