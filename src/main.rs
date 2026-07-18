@@ -143,25 +143,19 @@ fn dump_reader(source: &str) -> ExitCode {
 /// execute anything (expansion only inspects source shape and known
 /// compile-time integer constants, never runtime values).
 fn dump_core(source: &str) -> ExitCode {
-    let exprs = match regatelisp::parse_program(source) {
-        Ok(exprs) => exprs,
+    let mut compiler = Compiler::new();
+    match compiler.expand_source(source) {
+        Ok(expressions) => {
+            for core in expressions {
+                println!("{core:?}");
+            }
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut compiler = Compiler::new();
-    for expr in &exprs {
-        match compiler.expand_only(expr) {
-            Ok(core) => println!("{core:?}"),
-            Err(err) => {
-                eprintln!("error: {err}");
-                return ExitCode::FAILURE;
-            }
+            ExitCode::FAILURE
         }
     }
-    ExitCode::SUCCESS
 }
 
 /// `--dump-ir`: compiles source to verified IR and prints its deterministic

@@ -203,6 +203,7 @@ pub struct Compiler {
     module: IrModule,
     constants: ConstantEnv,
     next_loop_id: u32,
+    next_gensym_id: u64,
 }
 
 impl Compiler {
@@ -216,6 +217,7 @@ impl Compiler {
             module: IrModule::new(),
             constants: ConstantEnv::default(),
             next_loop_id: 0,
+            next_gensym_id: 0,
         }
     }
 
@@ -223,11 +225,25 @@ impl Compiler {
     /// as it is added, without executing any of it.
     pub fn compile_source(&mut self, source: &str) -> Result<Vec<IrTopLevel>, LispError> {
         let exprs = parser::parse_program(source)?;
-        let mut top_levels = Vec::with_capacity(exprs.len());
-        for expr in &exprs {
+        let (expanded, next_gensym_id) =
+            crate::macro_expand::expand_program(&exprs, self.next_gensym_id)?;
+        self.next_gensym_id = next_gensym_id;
+        let mut top_levels = Vec::with_capacity(expanded.len());
+        for expr in &expanded {
             top_levels.push(self.compile_expr(expr)?);
         }
         Ok(top_levels)
+    }
+
+    pub fn expand_source(&mut self, source: &str) -> Result<Vec<CoreExpr>, LispError> {
+        let exprs = parser::parse_program(source)?;
+        let (expanded, next_gensym_id) =
+            crate::macro_expand::expand_program(&exprs, self.next_gensym_id)?;
+        self.next_gensym_id = next_gensym_id;
+        expanded
+            .iter()
+            .map(|expression| self.expand_only(expression))
+            .collect()
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<IrTopLevel, LispError> {

@@ -352,6 +352,7 @@ pub enum LowerError {
     TooManyFunctions,
     TooManyLoops,
     InvalidGensymSyntax { got: usize },
+    UnboundGeneratedSymbol(String),
 }
 
 impl fmt::Display for LowerError {
@@ -377,6 +378,9 @@ impl fmt::Display for LowerError {
             LowerError::TooManyLoops => write!(f, "too many runtime loops in one function"),
             LowerError::InvalidGensymSyntax { got } => {
                 write!(f, "gensym expects 0 or 1 arguments, got {got}")
+            }
+            LowerError::UnboundGeneratedSymbol(name) => {
+                write!(f, "unbound generated symbol: {name}")
             }
         }
     }
@@ -446,6 +450,7 @@ pub enum LispError {
     Verify(VerifyError),
     Eval(EvalError),
     Backend(BackendError),
+    Macro(MacroExpandError),
 }
 
 impl fmt::Display for LispError {
@@ -458,7 +463,110 @@ impl fmt::Display for LispError {
             LispError::Verify(e) => write!(f, "verify error: {e}"),
             LispError::Eval(e) => write!(f, "eval error: {e}"),
             LispError::Backend(e) => write!(f, "backend error: {e}"),
+            LispError::Macro(e) => write!(f, "macro expansion error: {e}"),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroExpandError {
+    InvalidMacroDefinition,
+    InvalidMacroName,
+    InvalidMacroParameterList,
+    DuplicateMacroParameter(String),
+    DuplicateMacroDefinition(String),
+    ReservedMacroName(String),
+    NestedMacroDefinition,
+    GeneratedMacroDefinition,
+    ForbiddenMacroOperation(String),
+    MacroArityMismatch {
+        name: String,
+        expected: usize,
+        got: usize,
+    },
+    MacroEvaluationFailed {
+        name: String,
+        cause: String,
+        stack: Vec<String>,
+    },
+    MacroResultIsNotDatum {
+        name: String,
+        actual: String,
+        stack: Vec<String>,
+    },
+    MacroExpansionDepthExceeded {
+        stack: Vec<String>,
+    },
+    MacroExpansionBudgetExceeded {
+        stack: Vec<String>,
+    },
+    InvalidDatumToExprConversion,
+}
+
+impl fmt::Display for MacroExpandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMacroDefinition => write!(f, "invalid defmacro definition"),
+            Self::InvalidMacroName => write!(f, "macro name must be an interned symbol"),
+            Self::InvalidMacroParameterList => {
+                write!(f, "macro parameters must be a list of interned symbols")
+            }
+            Self::DuplicateMacroParameter(name) => write!(f, "duplicate macro parameter: {name}"),
+            Self::DuplicateMacroDefinition(name) => write!(f, "duplicate macro definition: {name}"),
+            Self::ReservedMacroName(name) => write!(
+                f,
+                "reserved special form cannot be redefined as a macro: {name}"
+            ),
+            Self::NestedMacroDefinition => write!(
+                f,
+                "defmacro is only allowed as a directly written top-level form"
+            ),
+            Self::GeneratedMacroDefinition => {
+                write!(f, "a macro expansion may not generate defmacro")
+            }
+            Self::ForbiddenMacroOperation(name) => write!(
+                f,
+                "operation is not available during macro evaluation: {name}"
+            ),
+            Self::MacroArityMismatch {
+                name,
+                expected,
+                got,
+            } => write!(f, "macro {name} expects {expected} arguments, got {got}"),
+            Self::MacroEvaluationFailed { name, cause, stack } => write!(
+                f,
+                "macro {name} evaluation failed (stack: {}): {cause}",
+                stack.join(" -> ")
+            ),
+            Self::MacroResultIsNotDatum {
+                name,
+                actual,
+                stack,
+            } => write!(
+                f,
+                "macro {name} must return a Datum, got {actual} (stack: {})",
+                stack.join(" -> ")
+            ),
+            Self::MacroExpansionDepthExceeded { stack } => write!(
+                f,
+                "macro expansion depth exceeded (stack: {})",
+                stack.join(" -> ")
+            ),
+            Self::MacroExpansionBudgetExceeded { stack } => write!(
+                f,
+                "macro expansion invocation budget exceeded (stack: {})",
+                stack.join(" -> ")
+            ),
+            Self::InvalidDatumToExprConversion => {
+                write!(f, "macro result cannot be converted from Datum to syntax")
+            }
+        }
+    }
+}
+
+impl From<MacroExpandError> for LispError {
+    fn from(error: MacroExpandError) -> Self {
+        Self::Macro(error)
     }
 }
 

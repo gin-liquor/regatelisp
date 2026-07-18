@@ -22,6 +22,7 @@ pub mod ir;
 pub mod ir_eval;
 pub mod lexer;
 pub mod lower;
+pub mod macro_expand;
 pub mod parser;
 pub mod property;
 pub mod symbol;
@@ -35,20 +36,25 @@ pub use ast::{Expr, ExprKind};
 pub use core::{CoreExpr, CoreExprKind};
 pub use datum::{Datum, datum_to_expr, expr_to_datum};
 pub use error::{
-    BackendError, EvalError, ExpandError, FormatError, LexError, LispError, LowerError, ParseError,
-    VerifyError,
+    BackendError, EvalError, ExpandError, FormatError, LexError, LispError, LowerError,
+    MacroExpandError, ParseError, VerifyError,
 };
 pub use expand::{ExpansionLimits, ForConstantSource};
 pub use globals::{GlobalRegistry, GlobalStore, RuntimeConstants};
 pub use interpreter::{FrontendSession, Interpreter};
 pub use ir::IrModule;
 pub use lexer::{SpannedToken, Token};
+pub use macro_expand::{
+    MacroDef, MacroEnv, MacroExpansionFrame, MacroExpansionLimits, MacroExpansionSession,
+};
 pub use property::{Properties, PropertyValue};
 pub use symbol::{GensymId, Symbol};
 pub use value::{Builtin, Closure, Value};
 
 pub fn compile_systemverilog(source: &str) -> Result<String, hardware::HardwareError> {
     let expressions = parse_program(source).map_err(|_| hardware::HardwareError::InvalidModule)?;
+    let (expressions, _) = macro_expand::expand_program(&expressions, 0)
+        .map_err(|error| hardware::HardwareError::MacroExpansion(error.to_string()))?;
     let design = hardware::lower_hardware_design(&expressions)?;
     hardware::emit_systemverilog(&design)
 }

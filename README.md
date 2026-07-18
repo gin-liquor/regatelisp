@@ -173,9 +173,41 @@ interpreter starts deterministically at `g__g0`. Datum conversion is structural,
 does not reparse text, and intentionally drops syntax properties.
 
 Only the full S-expression forms are supported; reader abbreviations such as
-quote/backquote/comma and `unquote-splicing` are not implemented. Macros are
-reserved for Stage 9, and syntax-object/property APIs for Stage 9.5.
+quote/backquote/comma and `unquote-splicing` are not implemented. Syntax-object
+and property manipulation APIs remain out of scope.
 
 ```powershell
 Get-Content -Raw examples/quasiquote.lisp | cargo run --quiet
+```
+
+## User-defined macros (Stage 9)
+
+Top-level `defmacro` definitions transform S-expressions before ordinary Lisp
+or hardware lowering. Definitions are collected across the complete source unit,
+so a macro call may appear before its definition. Arguments are passed unevaluated
+as `Datum` values, and the macro body must return a `Datum`:
+
+```lisp
+(defmacro when (condition body)
+  (quasiquote
+    (if (unquote condition)
+        (unquote body)
+        0)))
+
+(when (> value 0)
+  (+ value 1))
+```
+
+Expansion is recursive. `quote` shields its contents, while matching `unquote`
+expressions inside `quasiquote` are expanded. `gensym` can introduce lexical
+bindings without capturing user names, and its numbering continues into runtime
+evaluation in the same session. Macro evaluation is isolated: output and global
+definition operations are unavailable. Expansion is bounded by a depth limit of
+256 and an invocation budget of 10,000.
+
+```powershell
+Get-Content -Raw examples/macros.lisp | cargo run --quiet
+
+Get-Content -Raw examples/macros_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
 ```

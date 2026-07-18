@@ -66,3 +66,17 @@ fn formatting_example() {
         )
     );
 }
+
+#[test]
+fn macros_example() {
+    let values = eval_example("examples/macros.lisp");
+    assert_eq!(as_ints(&values), vec![42]);
+}
+
+#[test]
+fn hardware_macros_example() {
+    let source = std::fs::read_to_string("examples/macros_sv.lisp").unwrap();
+    let output = regatelisp::compile_systemverilog(&source).unwrap();
+    assert!(output.contains("module macro_adder"));
+    assert!(output.contains("assign y = (a + 8'd1);"));
+}

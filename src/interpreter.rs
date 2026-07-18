@@ -64,12 +64,23 @@ pub struct Interpreter<W: Write> {
 
 impl<W: Write> Interpreter<W> {
     pub fn new(output: W) -> Self {
+        Self::new_with_capabilities(output, true)
+    }
+
+    pub(crate) fn new_compile_time(output: W) -> Self {
+        Self::new_with_capabilities(output, false)
+    }
+
+    fn new_with_capabilities(output: W, allow_output: bool) -> Self {
         let frontend = FrontendSession::new();
         let runtime = Runtime::new(output);
         // Builtins are ordinary global values; bind them up front so
         // `LoadGlobal` on e.g. `+` resolves immediately, without a special
         // "is this a builtin" check anywhere in the IR pipeline.
         for (name, value) in crate::builtin::all() {
+            if !allow_output && name == "print" {
+                continue;
+            }
             let id = frontend
                 .globals
                 .lookup(name)
@@ -82,6 +93,10 @@ impl<W: Write> Interpreter<W> {
     /// Expands, lowers, verifies, and evaluates a single reader expression
     /// as a top-level form (so `def` is permitted).
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, LispError> {
+        self.eval_expr_unexpanded(expr)
+    }
+
+    pub(crate) fn eval_expr_unexpanded(&mut self, expr: &Expr) -> Result<Value, LispError> {
         let core = {
             let constants = RuntimeConstants {
                 registry: &self.frontend.globals,
@@ -133,12 +148,28 @@ impl<W: Write> Interpreter<W> {
         ir_eval::eval_ir_top_level(&top_level, &self.frontend.module, &mut self.runtime)
     }
 
+    pub(crate) fn define_compile_time_binding(&mut self, name: &str, value: Value) {
+        let id = self.frontend.globals.intern(name);
+        self.runtime.global_values.define(id, value);
+    }
+
+    pub(crate) fn next_gensym_id(&self) -> u64 {
+        self.runtime.next_gensym_id()
+    }
+
+    pub(crate) fn set_next_gensym_id(&mut self, next: u64) {
+        self.runtime.set_next_gensym_id(next);
+    }
+
     /// Evaluates every top-level expression in `source`, in order.
     pub fn eval_source(&mut self, source: &str) -> Result<Vec<Value>, LispError> {
         let exprs = parser::parse_program(source)?;
-        let mut results = Vec::with_capacity(exprs.len());
-        for expr in &exprs {
-            results.push(self.eval_expr(expr)?);
+        let (expanded, next_gensym_id) =
+            crate::macro_expand::expand_program(&exprs, self.runtime.next_gensym_id())?;
+        self.runtime.set_next_gensym_id(next_gensym_id);
+        let mut results = Vec::with_capacity(expanded.len());
+        for expr in &expanded {
+            results.push(self.eval_expr_unexpanded(expr)?);
         }
         Ok(results)
     }

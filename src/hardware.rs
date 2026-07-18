@@ -34,6 +34,7 @@ pub enum HardwareError {
     DatumNotHardwareValue,
     CombinationalLoop(String),
     InvalidIdentifier(String),
+    MacroExpansion(String),
 }
 impl fmt::Display for HardwareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

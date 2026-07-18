@@ -21,6 +21,7 @@ use crate::ir::{
     IrBody, IrConst, IrExpr, IrExprKind, IrFunction, IrLetBinding, IrQuasiDatum, IrStateBinding,
     IrStateUpdate, IrTopLevel,
 };
+use crate::symbol::Symbol;
 
 /// Special-form names that `def` may never bind -- recognized as syntax
 /// before any name resolution happens, so a binding under one of these
@@ -41,6 +42,14 @@ const RESERVED_DEF_NAMES: &[&str] = &[
     "false",
 ];
 
+fn binding_symbol(expr: &CoreExpr) -> Option<Symbol> {
+    match expr.kind() {
+        CoreExprKind::Symbol(name) => Some(Symbol::interned(name.clone())),
+        CoreExprKind::GeneratedSymbol(symbol) => Some(symbol.clone()),
+        _ => None,
+    }
+}
+
 /// Where a resolved name lives, from the referencing function's point of
 /// view. Resolution never falls back to a runtime string search: every
 /// non-global reference becomes a concrete slot during lowering.
@@ -51,7 +60,7 @@ enum ResolvedBinding {
 }
 
 /// One lexical block's name -> slot bindings within a single function.
-type Scope = HashMap<String, LocalSlot>;
+type Scope = HashMap<Symbol, LocalSlot>;
 
 /// Per-function lowering state: its lexical scope stack (innermost last),
 /// its capture list (built up as free variables are discovered), its
@@ -83,7 +92,7 @@ impl FunctionScope {
         self.scopes.pop();
     }
 
-    fn declare(&mut self, name: &str) -> Result<LocalSlot, LowerError> {
+    fn declare(&mut self, name: &Symbol) -> Result<LocalSlot, LowerError> {
         let slot = LocalSlot(self.next_local);
         self.next_local = self
             .next_local
@@ -92,13 +101,13 @@ impl FunctionScope {
         self.scopes
             .last_mut()
             .expect("a function scope always has at least one block")
-            .insert(name.to_string(), slot);
+            .insert(name.clone(), slot);
         Ok(slot)
     }
 
     /// Looks up `name` in this function's own lexical scopes only
     /// (innermost first), without consulting enclosing functions.
-    fn resolve_own(&self, name: &str) -> Option<LocalSlot> {
+    fn resolve_own(&self, name: &Symbol) -> Option<LocalSlot> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
 }
@@ -208,7 +217,7 @@ impl<'a> LowerContext<'a> {
     /// closure can be re-captured by an inner one). Returns `None` if no
     /// enclosing function scope binds the name at all, meaning it must be
     /// a global.
-    fn resolve(&mut self, name: &str) -> Option<ResolvedBinding> {
+    fn resolve(&mut self, name: &Symbol) -> Option<ResolvedBinding> {
         let depth = self.function_stack.len();
         if depth == 0 {
             return None;
@@ -329,8 +338,8 @@ fn lower_expr(core: &CoreExpr, context: &mut LowerContext) -> Result<IrExpr, Low
             span,
             IrExprKind::Const(IrConst::String(s.clone())),
         )),
-        CoreExprKind::Symbol(name) => lower_symbol(name, context, span),
-        CoreExprKind::GeneratedSymbol(_) => Err(LowerError::InvalidCoreForm),
+        CoreExprKind::Symbol(name) => lower_symbol(&Symbol::interned(name.clone()), context, span),
+        CoreExprKind::GeneratedSymbol(symbol) => lower_symbol(symbol, context, span),
         CoreExprKind::Quote(datum) => Ok(IrExpr::new(span, IrExprKind::Quote(datum.clone()))),
         CoreExprKind::QuasiQuote(template) => Ok(IrExpr::new(
             span,
@@ -347,7 +356,11 @@ fn lower_expr(core: &CoreExpr, context: &mut LowerContext) -> Result<IrExpr, Low
     }
 }
 
-fn lower_symbol(name: &str, context: &mut LowerContext, span: Span) -> Result<IrExpr, LowerError> {
+fn lower_symbol(
+    name: &Symbol,
+    context: &mut LowerContext,
+    span: Span,
+) -> Result<IrExpr, LowerError> {
     match context.resolve(name) {
         Some(ResolvedBinding::Local(slot)) => Ok(IrExpr::new(span, IrExprKind::LoadLocal(slot))),
         Some(ResolvedBinding::Capture(slot)) => {
@@ -360,6 +373,9 @@ fn lower_symbol(name: &str, context: &mut LowerContext, span: Span) -> Result<Ir
             // when actually loaded), which is what preserves lazy `if`
             // branch evaluation and forward references like a function
             // reading a global defined after it.
+            let Some(name) = name.as_interned() else {
+                return Err(LowerError::UnboundGeneratedSymbol(name.to_string()));
+            };
             let id = context.globals.intern(name);
             Ok(IrExpr::new(span, IrExprKind::LoadGlobal(id)))
         }
@@ -457,18 +473,18 @@ fn lower_fn(
     let function_id = context.alloc_function_id()?;
     context.function_stack.push(FunctionScope::new());
 
-    let mut param_names = Vec::with_capacity(param_exprs.len());
+    let mut param_names: Vec<Symbol> = Vec::with_capacity(param_exprs.len());
     for param_expr in param_exprs {
-        let CoreExprKind::Symbol(param_name) = param_expr.kind() else {
+        let Some(param_name) = binding_symbol(param_expr) else {
             context.function_stack.pop();
             return Err(LowerError::InvalidCoreForm);
         };
-        if param_names.contains(param_name) {
+        if param_names.contains(&param_name) {
             context.function_stack.pop();
-            return Err(LowerError::DuplicateParameter(param_name.clone()));
+            return Err(LowerError::DuplicateParameter(param_name.to_string()));
         }
-        context.current().declare(param_name)?;
-        param_names.push(param_name.clone());
+        context.current().declare(&param_name)?;
+        param_names.push(param_name);
     }
 
     let body_result = lower_expr(body_expr, context);
@@ -524,16 +540,16 @@ fn lower_let(
         let [name_expr, init_expr] = pair.as_slice() else {
             return Err(LowerError::InvalidCoreForm);
         };
-        let CoreExprKind::Symbol(name) = name_expr.kind() else {
+        let Some(name) = binding_symbol(name_expr) else {
             return Err(LowerError::InvalidCoreForm);
         };
-        if names.contains(name) {
-            return Err(LowerError::DuplicateBinding(name.clone()));
+        if names.contains(&name) {
+            return Err(LowerError::DuplicateBinding(name.to_string()));
         }
         // All initializers lower in the scope active before this `let`
         // introduces any of its own names.
         initializers.push(lower_expr(init_expr, context)?);
-        names.push(name.clone());
+        names.push(name);
     }
 
     context.current().push_scope();
@@ -635,7 +651,7 @@ fn lower_range_loop(
         [name, start, end, step] => (name, start, end, Some(step)),
         _ => return Err(LowerError::InvalidCoreForm),
     };
-    let CoreExprKind::Symbol(var_name) = name.kind() else {
+    let Some(var_name) = binding_symbol(name) else {
         return Err(LowerError::InvalidCoreForm);
     };
 
@@ -651,7 +667,7 @@ fn lower_range_loop(
 
     let loop_id = context.alloc_loop_id()?;
     context.current().push_scope();
-    let variable = context.current().declare(var_name)?;
+    let variable = context.current().declare(&var_name)?;
     context.current().loop_stack.push(loop_id);
     let body_result = lower_expr(body_expr, context);
     context.current().loop_stack.pop();
@@ -714,14 +730,14 @@ fn lower_general_loop(
         let [name_expr, init] = pair.as_slice() else {
             return Err(LowerError::InvalidCoreForm);
         };
-        let CoreExprKind::Symbol(name) = name_expr.kind() else {
+        let Some(name) = binding_symbol(name_expr) else {
             return Err(LowerError::InvalidCoreForm);
         };
-        if names.contains(name) {
-            return Err(LowerError::DuplicateLoopState(name.clone()));
+        if names.contains(&name) {
+            return Err(LowerError::DuplicateLoopState(name.to_string()));
         }
         initializer_irs.push(lower_expr(init, context)?);
-        names.push(name.clone());
+        names.push(name);
     }
 
     let loop_id = context.alloc_loop_id()?;
@@ -754,10 +770,10 @@ fn lower_general_loop(
             let [name_expr, value_core] = pair.as_slice() else {
                 return Err(LowerError::InvalidCoreForm);
             };
-            let CoreExprKind::Symbol(n) = name_expr.kind() else {
+            let Some(n) = binding_symbol(name_expr) else {
                 return Err(LowerError::InvalidCoreForm);
             };
-            if n != expected_name {
+            if &n != expected_name {
                 return Err(LowerError::InvalidCoreForm);
             }
             let value = lower_expr(value_core, context)?;
@@ -765,7 +781,7 @@ fn lower_general_loop(
                 .current()
                 .scopes
                 .last()
-                .and_then(|s| s.get(n))
+                .and_then(|s| s.get(&n))
                 .expect("state name was just declared in this scope");
             updates.push(IrStateUpdate {
                 target,

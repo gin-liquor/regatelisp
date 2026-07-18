@@ -64,6 +64,14 @@ impl<W: Write> Runtime<W> {
         self.next_gensym_id = next;
         Ok(Symbol::generated(id, hint))
     }
+
+    pub(crate) fn next_gensym_id(&self) -> u64 {
+        self.next_gensym_id
+    }
+
+    pub(crate) fn set_next_gensym_id(&mut self, next: u64) {
+        self.next_gensym_id = next;
+    }
 }
 
 /// A single call/top-level frame: local variable storage sized to the
