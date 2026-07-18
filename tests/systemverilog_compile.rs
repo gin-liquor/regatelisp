@@ -1,9 +1,10 @@
 use regatelisp::compile_systemverilog;
 use regatelisp::hardware::{
-    HwDesign, HwEnum, HwEnumId, HwEnumMember, HwEnumMemberId, HwExpr, HwExprKind, HwModule, HwPort,
-    HwPortDirection, HwSignalId, HwSignalRef, HwType, verify_hardware_design,
+    HardwareError, HwDesign, HwEnum, HwEnumId, HwEnumMember, HwEnumMemberId, HwExpr, HwExprKind,
+    HwModule, HwPort, HwPortDirection, HwSignalId, HwSignalRef, HwType, lower_hardware_design,
+    verify_hardware_design,
 };
-use regatelisp::property::Properties;
+use regatelisp::property::{Properties, PropertyValue};
 
 #[test]
 fn emits_deterministic_passthrough() {
@@ -264,4 +265,346 @@ fn verifier_rejects_invalid_or_retyped_enum_member_ir() {
     };
     assert!(verify_hardware_design(&make_design(0, byte)).is_err());
     assert!(verify_hardware_design(&make_design(99, byte)).is_err());
+}
+
+#[test]
+fn emits_bit_slice_concat_and_resize_operations() {
+    let source = include_str!("../examples/vector_ops_sv.lisp");
+    let output = compile_systemverilog(source).unwrap();
+    assert!(output.contains("assign opcode = word[15:12];"));
+    assert!(output.contains("assign flag = word[11];"));
+    assert!(output.contains("assign swapped = {word[7:0], word[15:8]};"));
+    assert!(output.contains("assign extended = 16'($signed(signed_byte));"));
+    assert!(output.contains("captured <= word[7:0];"));
+}
+
+#[test]
+fn bit_operations_work_inside_control_expressions_and_preserve_signedness() {
+    let source = "(module bits (ports (input (meta ((width 1)) clk)) (input (meta ((width 16)) word)) (input (meta ((width 8) (signed true)) signed_byte)) (output (meta ((width 1)) flag)) (output (meta ((width 1)) signed_flag)) (output (meta ((width 4)) high_nibble)) (output (meta ((width 8)) y)) (output (meta ((width 16)) signed_concat)) (output (meta ((width 16) (signed true)) extended)) (output (meta ((width 16)) zero_extended)) (output (meta ((width 8)) saved))) (register saved) (assign flag (if (bit word 0) 1 0)) (assign signed_flag (bit signed_byte 7)) (assign high_nibble (slice signed_byte 7 4)) (assign y (case (slice word 3 2) (0 (slice word 7 0)) (else (concat (bit word 0) (slice word 6 0))))) (assign signed_concat (concat signed_byte signed_byte)) (assign extended (resize signed_byte 16)) (assign zero_extended (resize (slice word 7 0) 16)) (clocked (clock clk rising) (case-do (bit word 0) (0 (set saved (resize (slice word 7 0) 8))) (else (set saved (concat (slice word 3 0) (slice word 7 4)))))))";
+    let output = compile_systemverilog(source).unwrap();
+    assert!(output.contains("(word[0] ? 1'd1 : 1'd0)"));
+    assert!(output.contains("(word[3:2] == 2'd0)"));
+    assert!(output.contains("{word[0], word[6:0]}"));
+    assert!(output.contains("assign signed_flag = signed_byte[7];"));
+    assert!(output.contains("assign high_nibble = signed_byte[7:4];"));
+    assert!(output.contains("assign signed_concat = {signed_byte, signed_byte};"));
+    assert!(output.contains("case (word[0])"));
+    assert!(output.contains("saved <= 8'($unsigned(word[7:0]));"));
+    assert!(output.contains("saved <= {word[3:0], word[7:4]};"));
+    assert!(output.contains("assign zero_extended = 16'($unsigned(word[7:0]));"));
+}
+
+#[test]
+fn rejects_invalid_bit_slice_concat_and_resize_forms() {
+    let cases = [
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 1)) y))) (assign y (bit x 8)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 1)) y))) (assign y (bit x -1)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 4)) y))) (assign y (slice x 2 3)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 4)) y))) (assign y (slice x 8 5)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 8)) y))) (assign y (concat x)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 8)) y))) (assign y (concat x 1)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 8)) y))) (assign y (resize x 0)))",
+        "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width 16)) y))) (assign y x)",
+    ];
+    for source in cases {
+        assert!(compile_systemverilog(source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn reports_specific_vector_operation_lowering_errors() {
+    let wrap = |expression: &str, width| {
+        format!(
+            "(module bad (ports (input (meta ((width 8)) x)) (output (meta ((width {width})) y))) (assign y {expression}))"
+        )
+    };
+    assert_eq!(
+        compile_systemverilog(&wrap("(bit x)", 1)).unwrap_err(),
+        HardwareError::InvalidBitSelect
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(bit x x)", 1)).unwrap_err(),
+        HardwareError::InvalidBitSelect
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(bit x 8)", 1)).unwrap_err(),
+        HardwareError::IndexOutOfRange { index: 8, width: 8 }
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(slice x 3)", 4)).unwrap_err(),
+        HardwareError::InvalidSlice
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(slice x 2 3)", 1)).unwrap_err(),
+        HardwareError::InvalidSlice
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(concat x)", 8)).unwrap_err(),
+        HardwareError::InvalidConcat
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(resize x x)", 8)).unwrap_err(),
+        HardwareError::InvalidResize
+    );
+    assert_eq!(
+        compile_systemverilog(&wrap("(resize x 0)", 8)).unwrap_err(),
+        HardwareError::InvalidWidth("resize".into())
+    );
+    let overflow = "(module bad (ports (input (meta ((width 4294967295)) x)) (output (meta ((width 1)) y))) (assign y (concat x x)))";
+    assert_eq!(
+        compile_systemverilog(overflow).unwrap_err(),
+        HardwareError::InvalidWidth("concat".into())
+    );
+}
+
+#[test]
+fn handles_vector_operation_boundaries_enum_members_and_deep_nesting() {
+    let source = "(module vectors (ports (input (meta ((width 8)) x)) (input (meta ((width 8) (signed true)) sx)) (output (meta ((width 8)) full)) (output (meta ((width 1)) one)) (output (meta ((width 24)) three)) (output (meta ((width 16)) symbolic)) (output (meta ((width 16)) typed_literal)) (output (meta ((width 4)) shrunk)) (output (meta ((width 4) (signed true)) signed_shrunk)) (output (meta ((width 8)) same)) (output (meta ((width 8)) nested))) (enum Byte 8 (MAGIC 165)) (assign full (slice x 7 0)) (assign one (slice sx 0 0)) (assign three (concat x sx MAGIC)) (assign symbolic (concat MAGIC x)) (assign typed_literal (concat (meta ((width 8)) 1) x)) (assign shrunk (resize x 4)) (assign signed_shrunk (resize sx 4)) (assign same (resize x 8)) (assign nested (slice (concat (slice x 3 0) (slice x 7 4)) 7 0)))";
+    let output = compile_systemverilog(source).unwrap();
+    assert!(output.contains("assign full = x[7:0];"));
+    assert!(output.contains("assign one = sx[0:0];"));
+    assert!(output.contains("assign three = {x, sx, MAGIC};"));
+    assert!(output.contains("assign symbolic = {MAGIC, x};"));
+    assert!(output.contains("assign typed_literal = {8'd1, x};"));
+    assert!(output.contains("assign shrunk = 4'($unsigned(x));"));
+    assert!(output.contains("assign signed_shrunk = 4'($signed(sx));"));
+    assert!(output.contains("assign same = 8'($unsigned(x));"));
+    assert!(output.contains("assign nested = ({x[3:0], x[7:4]})[7:0];"));
+}
+
+#[test]
+fn vector_operation_ir_preserves_source_properties() {
+    let source = "(module props (ports (input (meta ((width 8)) x)) (output (meta ((width 1)) b)) (output (meta ((width 4)) s)) (output (meta ((width 16)) c)) (output (meta ((width 16)) r))) (assign b (meta ((operation bit)) (bit x 0))) (assign s (meta ((operation slice)) (slice x 3 0))) (assign c (meta ((operation concat)) (concat x x))) (assign r (meta ((operation resize)) (resize x 16))))";
+    let expressions = regatelisp::parse_program(source).unwrap();
+    let design = lower_hardware_design(&expressions).unwrap();
+    let expected = ["bit", "slice", "concat", "resize"];
+    for (assignment, expected) in design.modules[0].assignments.iter().zip(expected) {
+        assert_eq!(
+            assignment.value.properties.get("operation"),
+            Some(&PropertyValue::Symbol(expected.into()))
+        );
+    }
+}
+
+#[test]
+fn verifier_rejects_malformed_bit_operation_ir() {
+    let byte = HwType {
+        width: 8,
+        signed: false,
+    };
+    let bit = HwType {
+        width: 1,
+        signed: false,
+    };
+    let signed_bit = HwType {
+        width: 1,
+        signed: true,
+    };
+    let nibble = HwType {
+        width: 4,
+        signed: false,
+    };
+    let signed_byte = HwType {
+        width: 8,
+        signed: true,
+    };
+    let signed_nibble = HwType {
+        width: 4,
+        signed: true,
+    };
+    let signed_word = HwType {
+        width: 16,
+        signed: true,
+    };
+    let malformed = |kind, ty| HwDesign {
+        modules: vec![HwModule {
+            name: "bad_bit_ir".into(),
+            ports: vec![
+                HwPort {
+                    direction: HwPortDirection::Input,
+                    name: "x".into(),
+                    ty: byte,
+                    properties: Properties::new(),
+                },
+                HwPort {
+                    direction: HwPortDirection::Output,
+                    name: "y".into(),
+                    ty,
+                    properties: Properties::new(),
+                },
+            ],
+            assignments: vec![regatelisp::hardware::HwAssignment {
+                destination: HwSignalRef { id: HwSignalId(1) },
+                value: HwExpr {
+                    kind,
+                    ty,
+                    properties: Properties::new(),
+                },
+                properties: Properties::new(),
+            }],
+            registers: vec![],
+            clocked_blocks: vec![],
+            enums: vec![],
+            properties: Properties::new(),
+        }],
+    };
+    let reference = || HwExpr {
+        kind: HwExprKind::Reference(HwSignalRef { id: HwSignalId(0) }),
+        ty: byte,
+        properties: Properties::new(),
+    };
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::BitSelect {
+                value: Box::new(reference()),
+                index: 8
+            },
+            bit
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Slice {
+                value: Box::new(reference()),
+                high: 3,
+                low: 0
+            },
+            signed_nibble
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::BitSelect {
+                value: Box::new(reference()),
+                index: 0
+            },
+            signed_bit
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Slice {
+                value: Box::new(reference()),
+                high: 3,
+                low: 4
+            },
+            nibble
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Slice {
+                value: Box::new(reference()),
+                high: 8,
+                low: 5
+            },
+            nibble
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Slice {
+                value: Box::new(reference()),
+                high: 3,
+                low: 0
+            },
+            byte
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Concat {
+                values: vec![reference()]
+            },
+            byte
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Concat {
+                values: vec![reference(), reference()]
+            },
+            signed_word
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Resize {
+                value: Box::new(reference()),
+                new_width: 0
+            },
+            byte
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Resize {
+                value: Box::new(reference()),
+                new_width: 4
+            },
+            byte
+        ))
+        .is_err()
+    );
+    assert!(
+        verify_hardware_design(&malformed(
+            HwExprKind::Resize {
+                value: Box::new(reference()),
+                new_width: 8
+            },
+            signed_byte
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn sample_systemverilog_passes_an_available_external_compiler() {
+    let systemverilog =
+        compile_systemverilog(include_str!("../examples/vector_ops_sv.lisp")).unwrap();
+    let temp = std::env::temp_dir();
+    let stem = format!("regatelisp_vector_ops_{}", std::process::id());
+    let source_path = temp.join(format!("{stem}.sv"));
+    let output_path = temp.join(format!("{stem}.out"));
+    std::fs::write(&source_path, systemverilog).unwrap();
+
+    let iverilog_available = std::process::Command::new("iverilog")
+        .arg("-V")
+        .output()
+        .is_ok();
+    if iverilog_available {
+        let status = std::process::Command::new("iverilog")
+            .args(["-g2012", "-s", "vector_ops", "-o"])
+            .arg(&output_path)
+            .arg(&source_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "Icarus Verilog rejected generated output");
+    }
+
+    let verilator_available = std::process::Command::new("verilator")
+        .arg("--version")
+        .output()
+        .is_ok();
+    if verilator_available {
+        let status = std::process::Command::new("verilator")
+            .args(["--lint-only", "--top-module", "vector_ops"])
+            .arg(&source_path)
+            .current_dir(&temp)
+            .status()
+            .unwrap();
+        assert!(status.success(), "Verilator rejected generated output");
+    }
+
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(output_path);
 }

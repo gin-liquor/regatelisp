@@ -26,6 +26,11 @@ pub enum HardwareError {
     UntypedConstant,
     ConstantOutOfRange(i64),
     UnsupportedExpression,
+    InvalidBitSelect,
+    InvalidSlice,
+    InvalidConcat,
+    InvalidResize,
+    IndexOutOfRange { index: u32, width: u32 },
     CombinationalLoop(String),
     InvalidIdentifier(String),
 }
@@ -137,6 +142,22 @@ pub enum HwExprKind {
         selector: Box<HwExpr>,
         arms: Vec<HwCaseExprArm>,
         default: Box<HwExpr>,
+    },
+    BitSelect {
+        value: Box<HwExpr>,
+        index: u32,
+    },
+    Slice {
+        value: Box<HwExpr>,
+        high: u32,
+        low: u32,
+    },
+    Concat {
+        values: Vec<HwExpr>,
+    },
+    Resize {
+        value: Box<HwExpr>,
+        new_width: u32,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1092,6 +1113,115 @@ fn lower_application(
             properties,
         });
     }
+    if name == "bit" {
+        let [value, index] = rest else {
+            return Err(HardwareError::InvalidBitSelect);
+        };
+        let value = lower_core(value, env)?;
+        let index = hardware_index(index, HardwareError::InvalidBitSelect)?;
+        if index >= value.ty.width {
+            return Err(HardwareError::IndexOutOfRange {
+                index,
+                width: value.ty.width,
+            });
+        }
+        return require_type(
+            HwExpr {
+                kind: HwExprKind::BitSelect {
+                    value: Box::new(value),
+                    index,
+                },
+                ty: HwType {
+                    width: 1,
+                    signed: false,
+                },
+                properties,
+            },
+            expected,
+        );
+    }
+    if name == "slice" {
+        let [value, high, low] = rest else {
+            return Err(HardwareError::InvalidSlice);
+        };
+        let value = lower_core(value, env)?;
+        let high = hardware_index(high, HardwareError::InvalidSlice)?;
+        let low = hardware_index(low, HardwareError::InvalidSlice)?;
+        if high < low {
+            return Err(HardwareError::InvalidSlice);
+        }
+        if high >= value.ty.width {
+            return Err(HardwareError::IndexOutOfRange {
+                index: high,
+                width: value.ty.width,
+            });
+        }
+        return require_type(
+            HwExpr {
+                kind: HwExprKind::Slice {
+                    value: Box::new(value),
+                    high,
+                    low,
+                },
+                ty: HwType {
+                    width: high - low + 1,
+                    signed: false,
+                },
+                properties,
+            },
+            expected,
+        );
+    }
+    if name == "concat" {
+        if rest.len() < 2 {
+            return Err(HardwareError::InvalidConcat);
+        }
+        let values = rest
+            .iter()
+            .map(|value| lower_core(value, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        let width = values.iter().try_fold(0_u32, |width, value| {
+            width
+                .checked_add(value.ty.width)
+                .ok_or(HardwareError::InvalidWidth("concat".into()))
+        })?;
+        return require_type(
+            HwExpr {
+                kind: HwExprKind::Concat { values },
+                ty: HwType {
+                    width,
+                    signed: false,
+                },
+                properties,
+            },
+            expected,
+        );
+    }
+    if name == "resize" {
+        let [value, width] = rest else {
+            return Err(HardwareError::InvalidResize);
+        };
+        let value = lower_core(value, env)?;
+        let new_width = hardware_index(width, HardwareError::InvalidResize)?;
+        if new_width == 0 {
+            return Err(HardwareError::InvalidWidth("resize".into()));
+        }
+        let signed = value.ty.signed;
+        return require_type(
+            HwExpr {
+                kind: HwExprKind::Resize {
+                    value: Box::new(value),
+                    new_width,
+                },
+                ty: HwType {
+                    width: new_width,
+                    signed,
+                },
+                properties,
+            },
+            expected,
+        );
+    }
     if name == "bit-not" {
         let [operand] = rest else {
             return Err(HardwareError::UnsupportedExpression);
@@ -1178,6 +1308,13 @@ fn lower_application(
         },
         expected,
     )
+}
+
+fn hardware_index(core: &CoreExpr, error: HardwareError) -> Result<u32, HardwareError> {
+    let CoreExprKind::Int(value) = core.kind() else {
+        return Err(error);
+    };
+    u32::try_from(*value).map_err(|_| error)
 }
 
 fn lower_clocked(
@@ -1741,6 +1878,14 @@ fn collect_references(expr: &HwExpr, references: &mut Vec<HwSignalId>) {
             }
             collect_references(default, references);
         }
+        HwExprKind::BitSelect { value, .. }
+        | HwExprKind::Slice { value, .. }
+        | HwExprKind::Resize { value, .. } => collect_references(value, references),
+        HwExprKind::Concat { values } => {
+            for value in values {
+                collect_references(value, references);
+            }
+        }
     }
 }
 
@@ -1848,6 +1993,59 @@ fn verify_hardware_expr(expr: &HwExpr, module: &HwModule) -> Result<(), Hardware
                 }
             }
             Ok(())
+        }
+        HwExprKind::BitSelect { value, index } => {
+            verify_hardware_expr(value, module)?;
+            if *index < value.ty.width
+                && expr.ty
+                    == (HwType {
+                        width: 1,
+                        signed: false,
+                    })
+            {
+                Ok(())
+            } else {
+                Err(HardwareError::TypeMismatch)
+            }
+        }
+        HwExprKind::Slice { value, high, low } => {
+            verify_hardware_expr(value, module)?;
+            if high >= low
+                && *high < value.ty.width
+                && expr.ty
+                    == (HwType {
+                        width: high - low + 1,
+                        signed: false,
+                    })
+            {
+                Ok(())
+            } else {
+                Err(HardwareError::TypeMismatch)
+            }
+        }
+        HwExprKind::Concat { values } => {
+            if values.len() < 2 {
+                return Err(HardwareError::InvalidModule);
+            }
+            let width = values.iter().try_fold(0_u32, |width, value| {
+                verify_hardware_expr(value, module)?;
+                width
+                    .checked_add(value.ty.width)
+                    .ok_or(HardwareError::InvalidWidth("concat".into()))
+            })?;
+            if !expr.ty.signed && expr.ty.width == width {
+                Ok(())
+            } else {
+                Err(HardwareError::TypeMismatch)
+            }
+        }
+        HwExprKind::Resize { value, new_width } => {
+            verify_hardware_expr(value, module)?;
+            if *new_width > 0 && expr.ty.width == *new_width && expr.ty.signed == value.ty.signed {
+                Ok(())
+            } else {
+                Err(HardwareError::TypeMismatch)
+            }
         }
     }
 }
@@ -2083,6 +2281,39 @@ fn emit_expr(expr: &HwExpr, module: &HwModule) -> String {
             }
             result
         }
+        HwExprKind::BitSelect { value, index } => {
+            format!("{}[{}]", emit_select_base(value, module), index)
+        }
+        HwExprKind::Slice { value, high, low } => {
+            format!("{}[{}:{}]", emit_select_base(value, module), high, low)
+        }
+        HwExprKind::Concat { values } => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|value| emit_expr(value, module))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        HwExprKind::Resize { value, new_width } => {
+            let value = emit_expr(value, module);
+            if expr.ty.signed {
+                format!("{}'($signed({}))", new_width, value)
+            } else {
+                format!("{}'($unsigned({}))", new_width, value)
+            }
+        }
+    }
+}
+
+fn emit_select_base(expr: &HwExpr, module: &HwModule) -> String {
+    let emitted = emit_expr(expr, module);
+    match &expr.kind {
+        HwExprKind::Reference(_)
+        | HwExprKind::EnumMember(_)
+        | HwExprKind::BitSelect { .. }
+        | HwExprKind::Slice { .. } => emitted,
+        _ => format!("({emitted})"),
     }
 }
 

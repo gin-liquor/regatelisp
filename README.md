@@ -124,3 +124,23 @@ execution path are rejected.
 Get-Content -Raw examples/fsm_sv.lisp |
     cargo run --quiet -- --emit-systemverilog
 ```
+
+## Vector operations (Stage 7)
+
+Hardware expressions support fixed, compile-time bit and vector operations:
+
+```lisp
+(bit value index)          ; index 0 is the LSB
+(slice value high low)     ; inclusive [high:low]
+(concat upper lower)       ; upper occupies the most-significant bits
+(resize value new-width)   ; zero-extends unsigned values, sign-extends signed values
+```
+
+`bit`, `slice`, and `concat` always produce unsigned values. `resize` preserves
+the operand's signedness and is the explicit way to change width; ordinary
+assignments still reject implicit width or signedness conversions.
+
+```powershell
+Get-Content -Raw examples/vector_ops_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
+```
