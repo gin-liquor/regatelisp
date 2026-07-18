@@ -136,6 +136,9 @@ pub enum EvalError {
     InvalidDefName,
     ReservedDefName(String),
     DefOutsideTopLevel,
+    CannotConvertToDatum(&'static str),
+    InvalidGensymPrefix(&'static str),
+    GensymIdOverflow,
 }
 
 impl fmt::Display for EvalError {
@@ -190,6 +193,16 @@ impl fmt::Display for EvalError {
                 )
             }
             EvalError::DefOutsideTopLevel => write!(f, "def is only allowed at top level"),
+            EvalError::CannotConvertToDatum(actual) => {
+                write!(f, "unquote result cannot be converted to datum: {actual}")
+            }
+            EvalError::InvalidGensymPrefix(actual) => {
+                write!(
+                    f,
+                    "gensym prefix must be an interned symbol datum, got {actual}"
+                )
+            }
+            EvalError::GensymIdOverflow => write!(f, "gensym ID overflow"),
         }
     }
 }
@@ -259,6 +272,10 @@ pub enum ExpandError {
     ConstantDivisionByZero,
     ConstantRemainderByZero,
     ConstantIntegerOverflow,
+    InvalidQuoteSyntax { got: usize },
+    InvalidQuasiquoteSyntax { got: usize },
+    InvalidUnquoteSyntax { got: usize },
+    UnquoteOutsideQuasiquote,
 }
 
 impl fmt::Display for ExpandError {
@@ -302,6 +319,18 @@ impl fmt::Display for ExpandError {
                     "integer overflow in a for expansion-time constant expression"
                 )
             }
+            ExpandError::InvalidQuoteSyntax { got } => {
+                write!(f, "quote expects exactly 1 argument, got {got}")
+            }
+            ExpandError::InvalidQuasiquoteSyntax { got } => {
+                write!(f, "quasiquote expects exactly 1 argument, got {got}")
+            }
+            ExpandError::InvalidUnquoteSyntax { got } => {
+                write!(f, "unquote expects exactly 1 argument, got {got}")
+            }
+            ExpandError::UnquoteOutsideQuasiquote => {
+                write!(f, "unquote may only be used inside quasiquote")
+            }
         }
     }
 }
@@ -322,6 +351,7 @@ pub enum LowerError {
     TooManyCaptures,
     TooManyFunctions,
     TooManyLoops,
+    InvalidGensymSyntax { got: usize },
 }
 
 impl fmt::Display for LowerError {
@@ -345,6 +375,9 @@ impl fmt::Display for LowerError {
             LowerError::TooManyCaptures => write!(f, "too many captured variables in one closure"),
             LowerError::TooManyFunctions => write!(f, "too many functions in one module"),
             LowerError::TooManyLoops => write!(f, "too many runtime loops in one function"),
+            LowerError::InvalidGensymSyntax { got } => {
+                write!(f, "gensym expects 0 or 1 arguments, got {got}")
+            }
         }
     }
 }

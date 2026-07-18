@@ -78,7 +78,7 @@ const FOLDABLE_BUILTIN_ARITHMETIC: &[&str] = &["+", "-", "*", "/", "%"];
 fn try_fold_int(expr: &Expr, env: &ConstantEnv, locals: &HashMap<String, i64>) -> Option<i64> {
     match expr.kind() {
         ExprKind::Int(n) => Some(*n),
-        ExprKind::Bool(_) | ExprKind::String(_) => None,
+        ExprKind::Bool(_) | ExprKind::String(_) | ExprKind::GeneratedSymbol(_) => None,
         ExprKind::Symbol(name) => locals
             .get(name)
             .copied()

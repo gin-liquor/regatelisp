@@ -1,4 +1,6 @@
+use crate::datum::Datum;
 use crate::property::{Properties, PropertyValue};
+use crate::symbol::Symbol;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreExpr {
@@ -12,8 +14,18 @@ pub enum CoreExprKind {
     Bool(bool),
     String(String),
     Symbol(String),
+    GeneratedSymbol(Symbol),
     List(Vec<CoreExpr>),
     Sequence(Vec<CoreExpr>),
+    Quote(Datum),
+    QuasiQuote(QuasiDatum),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuasiDatum {
+    Datum(Datum),
+    List(Vec<QuasiDatum>),
+    Evaluate(Box<CoreExpr>),
 }
 
 impl CoreExpr {
@@ -65,6 +77,14 @@ impl CoreExpr {
     }
     pub fn symbol(value: impl Into<String>) -> Self {
         Self::new(CoreExprKind::Symbol(value.into()))
+    }
+    pub fn symbol_value(value: Symbol) -> Self {
+        match value {
+            Symbol::Interned(name) => Self::symbol(name),
+            generated @ Symbol::Generated { .. } => {
+                Self::new(CoreExprKind::GeneratedSymbol(generated))
+            }
+        }
     }
     pub fn list(items: Vec<Self>) -> Self {
         Self::new(CoreExprKind::List(items))

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::datum::Datum;
 use crate::ids::FunctionId;
 
 /// A built-in function. Builtins are ordinary global values, so they
@@ -82,6 +83,7 @@ pub enum Value {
     Unit,
     Builtin(Builtin),
     Closure(Rc<Closure>),
+    Datum(Rc<Datum>),
 }
 
 impl Value {
@@ -93,6 +95,7 @@ impl Value {
             Value::Unit => "unit",
             Value::Builtin(_) => "builtin",
             Value::Closure(_) => "function",
+            Value::Datum(_) => "datum",
         }
     }
 }
@@ -106,6 +109,7 @@ impl fmt::Display for Value {
             Value::Unit => write!(f, "()"),
             Value::Builtin(b) => write!(f, "<builtin:{}>", b.name()),
             Value::Closure(_) => write!(f, "<fn>"),
+            Value::Datum(datum) => write!(f, "{datum}"),
         }
     }
 }

@@ -7,10 +7,14 @@ use std::io::Write;
 use std::rc::Rc;
 
 use crate::builtin::apply_builtin;
+use crate::datum::Datum;
 use crate::error::{EvalError, LispError};
 use crate::globals::GlobalStore;
 use crate::ids::{CaptureSlot, LocalSlot, LoopId};
-use crate::ir::{IrBody, IrCaptureSource, IrConst, IrExpr, IrExprKind, IrModule, IrTopLevel};
+use crate::ir::{
+    IrBody, IrCaptureSource, IrConst, IrExpr, IrExprKind, IrModule, IrQuasiDatum, IrTopLevel,
+};
+use crate::symbol::{GensymId, Symbol};
 use crate::value::{Closure, Value};
 
 /// Execution state shared across an entire `Interpreter`'s lifetime:
@@ -21,6 +25,7 @@ pub struct Runtime<W: Write> {
     pub global_values: Rc<GlobalStore>,
     pub output: W,
     pub limits: RuntimeLimits,
+    next_gensym_id: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +51,18 @@ impl<W: Write> Runtime<W> {
             global_values: Rc::new(GlobalStore::new()),
             output,
             limits: RuntimeLimits::default(),
+            next_gensym_id: 0,
         }
+    }
+
+    fn allocate_gensym(&mut self, hint: Option<String>) -> Result<Symbol, EvalError> {
+        let next = self
+            .next_gensym_id
+            .checked_add(1)
+            .ok_or(EvalError::GensymIdOverflow)?;
+        let id = GensymId(self.next_gensym_id);
+        self.next_gensym_id = next;
+        Ok(Symbol::generated(id, hint))
     }
 }
 
@@ -147,6 +163,27 @@ fn eval_expr<W: Write>(
 ) -> Result<Flow, LispError> {
     match &expr.kind {
         IrExprKind::Const(c) => Ok(Flow::Value(const_to_value(c))),
+        IrExprKind::Quote(datum) => Ok(Flow::Value(Value::Datum(Rc::new(datum.clone())))),
+        IrExprKind::QuasiQuote(template) => eval_quasi_datum(template, frame, module, runtime),
+        IrExprKind::Gensym { prefix } => {
+            let hint = if let Some(prefix) = prefix {
+                let value = match eval_expr(prefix, frame, module, runtime)? {
+                    Flow::Value(value) => value,
+                    flow @ Flow::Break { .. } => return Ok(flow),
+                };
+                match value {
+                    Value::Datum(datum) => match datum.as_ref() {
+                        Datum::Symbol(Symbol::Interned(name)) => Some(name.clone()),
+                        _ => return Err(EvalError::InvalidGensymPrefix("datum").into()),
+                    },
+                    other => return Err(EvalError::InvalidGensymPrefix(other.type_name()).into()),
+                }
+            } else {
+                None
+            };
+            let symbol = runtime.allocate_gensym(hint)?;
+            Ok(Flow::Value(Value::Datum(Rc::new(Datum::Symbol(symbol)))))
+        }
         IrExprKind::LoadLocal(slot) => Ok(Flow::Value(frame.load_local(*slot)?)),
         IrExprKind::LoadCapture(slot) => Ok(Flow::Value(frame.load_capture(*slot)?)),
         IrExprKind::LoadGlobal(id) => {
@@ -259,6 +296,50 @@ fn eval_expr<W: Write>(
             }
             Ok(Flow::Value(Value::Unit))
         }
+    }
+}
+
+fn eval_quasi_datum<W: Write>(
+    template: &IrQuasiDatum,
+    frame: &mut Frame,
+    module: &IrModule,
+    runtime: &mut Runtime<W>,
+) -> Result<Flow, LispError> {
+    match template {
+        IrQuasiDatum::Datum(datum) => Ok(Flow::Value(Value::Datum(Rc::new(datum.clone())))),
+        IrQuasiDatum::List(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                match eval_quasi_datum(item, frame, module, runtime)? {
+                    Flow::Value(Value::Datum(datum)) => values.push(datum.as_ref().clone()),
+                    flow @ Flow::Break { .. } => return Ok(flow),
+                    Flow::Value(_) => {
+                        return Err(EvalError::Io {
+                            message: "internal IR error: quasiquote produced a non-datum".into(),
+                        }
+                        .into());
+                    }
+                }
+            }
+            Ok(Flow::Value(Value::Datum(Rc::new(Datum::List(values)))))
+        }
+        IrQuasiDatum::Evaluate(expression) => {
+            match eval_expr(expression, frame, module, runtime)? {
+                Flow::Value(value) => {
+                    Ok(Flow::Value(Value::Datum(Rc::new(value_to_datum(value)?))))
+                }
+                flow @ Flow::Break { .. } => Ok(flow),
+            }
+        }
+    }
+}
+
+fn value_to_datum(value: Value) -> Result<Datum, EvalError> {
+    match value {
+        Value::Int(value) => Ok(Datum::Integer(value)),
+        Value::Bool(value) => Ok(Datum::Bool(value)),
+        Value::Datum(datum) => Ok(datum.as_ref().clone()),
+        other => Err(EvalError::CannotConvertToDatum(other.type_name())),
     }
 }
 
@@ -449,5 +530,20 @@ fn apply<W: Write>(
             }
         }
         other => Err(LispError::Eval(EvalError::NotCallable(other.to_string()))),
+    }
+}
+
+#[cfg(test)]
+mod stage_eight_tests {
+    use super::*;
+
+    #[test]
+    fn gensym_counter_overflow_is_an_error() {
+        let mut runtime = Runtime::new(Vec::new());
+        runtime.next_gensym_id = u64::MAX;
+        assert!(matches!(
+            runtime.allocate_gensym(None),
+            Err(EvalError::GensymIdOverflow)
+        ));
     }
 }

@@ -39,6 +39,7 @@ fn equality(op: Builtin, args: &[Value]) -> Result<Value, EvalError> {
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
+        (Value::Datum(a), Value::Datum(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
         (a, b) => {
             return Err(EvalError::ComparisonTypeMismatch {

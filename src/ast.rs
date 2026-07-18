@@ -1,4 +1,5 @@
 use crate::property::{Properties, PropertyValue};
+use crate::symbol::Symbol;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,7 @@ pub enum ExprKind {
     Bool(bool),
     String(String),
     Symbol(String),
+    GeneratedSymbol(Symbol),
     List(Vec<Expr>),
 }
 
@@ -70,6 +72,12 @@ impl Expr {
     pub fn symbol(value: impl Into<String>) -> Self {
         Self::new(ExprKind::Symbol(value.into()))
     }
+    pub fn symbol_value(value: Symbol) -> Self {
+        match value {
+            Symbol::Interned(name) => Self::symbol(name),
+            generated @ Symbol::Generated { .. } => Self::new(ExprKind::GeneratedSymbol(generated)),
+        }
+    }
     pub fn list(items: Vec<Self>) -> Self {
         Self::new(ExprKind::List(items))
     }
@@ -107,6 +115,7 @@ impl fmt::Display for ExprKindDisplay<'_> {
             ExprKind::Bool(value) => write!(f, "{value}"),
             ExprKind::String(value) => write!(f, "{}", PropertyValue::String(value.clone())),
             ExprKind::Symbol(value) => write!(f, "{value}"),
+            ExprKind::GeneratedSymbol(value) => write!(f, "{value}"),
             ExprKind::List(items) => {
                 write!(f, "(")?;
                 for (index, item) in items.iter().enumerate() {

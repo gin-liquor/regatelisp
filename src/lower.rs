@@ -13,20 +13,32 @@
 use std::collections::HashMap;
 
 use crate::capture::CaptureList;
-use crate::core::{CoreExpr, CoreExprKind};
+use crate::core::{CoreExpr, CoreExprKind, QuasiDatum};
 use crate::error::{LowerError, Span};
 use crate::globals::GlobalRegistry;
 use crate::ids::{CaptureSlot, FunctionId, LocalSlot, LoopId};
 use crate::ir::{
-    IrBody, IrConst, IrExpr, IrExprKind, IrFunction, IrLetBinding, IrStateBinding, IrStateUpdate,
-    IrTopLevel,
+    IrBody, IrConst, IrExpr, IrExprKind, IrFunction, IrLetBinding, IrQuasiDatum, IrStateBinding,
+    IrStateUpdate, IrTopLevel,
 };
 
 /// Special-form names that `def` may never bind -- recognized as syntax
 /// before any name resolution happens, so a binding under one of these
 /// names could never be referenced.
 const RESERVED_DEF_NAMES: &[&str] = &[
-    "fn", "let", "for", "loop", "def", "if", "break", "true", "false",
+    "fn",
+    "let",
+    "for",
+    "loop",
+    "def",
+    "if",
+    "break",
+    "quote",
+    "quasiquote",
+    "unquote",
+    "gensym",
+    "true",
+    "false",
 ];
 
 /// Where a resolved name lives, from the referencing function's point of
@@ -318,6 +330,12 @@ fn lower_expr(core: &CoreExpr, context: &mut LowerContext) -> Result<IrExpr, Low
             IrExprKind::Const(IrConst::String(s.clone())),
         )),
         CoreExprKind::Symbol(name) => lower_symbol(name, context, span),
+        CoreExprKind::GeneratedSymbol(_) => Err(LowerError::InvalidCoreForm),
+        CoreExprKind::Quote(datum) => Ok(IrExpr::new(span, IrExprKind::Quote(datum.clone()))),
+        CoreExprKind::QuasiQuote(template) => Ok(IrExpr::new(
+            span,
+            IrExprKind::QuasiQuote(lower_quasi_datum(template, context)?),
+        )),
         CoreExprKind::Sequence(items) => {
             let mut lowered = Vec::with_capacity(items.len());
             for item in items {
@@ -373,6 +391,7 @@ fn lower_list(
             "if" => return lower_if(&items[1..], context, span),
             "break" => return lower_break(&items[1..], context, span),
             "loop" => return lower_loop(&items[1..], context, span),
+            "gensym" => return lower_gensym(&items[1..], context, span),
             "def" => return Err(LowerError::DefOutsideDirectTopLevel),
             _ => {}
         }
@@ -390,6 +409,37 @@ fn lower_list(
             arguments,
         },
     ))
+}
+
+fn lower_gensym(
+    rest: &[CoreExpr],
+    context: &mut LowerContext,
+    span: Span,
+) -> Result<IrExpr, LowerError> {
+    let prefix = match rest {
+        [] => None,
+        [prefix] => Some(Box::new(lower_expr(prefix, context)?)),
+        _ => return Err(LowerError::InvalidGensymSyntax { got: rest.len() }),
+    };
+    Ok(IrExpr::new(span, IrExprKind::Gensym { prefix }))
+}
+
+fn lower_quasi_datum(
+    template: &QuasiDatum,
+    context: &mut LowerContext,
+) -> Result<IrQuasiDatum, LowerError> {
+    Ok(match template {
+        QuasiDatum::Datum(datum) => IrQuasiDatum::Datum(datum.clone()),
+        QuasiDatum::List(items) => IrQuasiDatum::List(
+            items
+                .iter()
+                .map(|item| lower_quasi_datum(item, context))
+                .collect::<Result<_, _>>()?,
+        ),
+        QuasiDatum::Evaluate(expression) => {
+            IrQuasiDatum::Evaluate(Box::new(lower_expr(expression, context)?))
+        }
+    })
 }
 
 fn lower_fn(

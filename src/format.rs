@@ -259,6 +259,7 @@ fn render_value(value: &Value, spec: &FormatSpec, output: &mut String) -> Result
         Value::Bool(b) => render_plain(if *b { "true" } else { "false" }, spec, output),
         Value::String(s) => render_string(s, spec, output),
         Value::Unit => render_plain("()", spec, output),
+        Value::Datum(datum) => render_plain(&datum.to_string(), spec, output),
         Value::Builtin(_) | Value::Closure(_) => Err(FormatError::TypeMismatch {
             format_type: format_type_label(spec.format_type),
             value_type: value.type_name(),

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ast::{Expr, ExprKind};
+use crate::symbol::Symbol;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropertyValue {
@@ -9,6 +10,7 @@ pub enum PropertyValue {
     Bool(bool),
     String(String),
     Symbol(String),
+    GeneratedSymbol(Symbol),
     List(Vec<PropertyValue>),
 }
 
@@ -20,6 +22,7 @@ impl PropertyValue {
             ExprKind::Bool(value) => Self::Bool(*value),
             ExprKind::String(value) => Self::String(value.clone()),
             ExprKind::Symbol(value) => Self::Symbol(value.clone()),
+            ExprKind::GeneratedSymbol(value) => Self::GeneratedSymbol(value.clone()),
             ExprKind::List(items) => Self::List(items.iter().map(Self::from_expr).collect()),
         }
     }
@@ -32,6 +35,7 @@ impl fmt::Display for PropertyValue {
             Self::Bool(value) => write!(f, "{value}"),
             Self::String(value) => write!(f, "\"{}\"", escape_string(value)),
             Self::Symbol(value) => write!(f, "{value}"),
+            Self::GeneratedSymbol(value) => write!(f, "{value}"),
             Self::List(items) => {
                 write!(f, "(")?;
                 for (index, item) in items.iter().enumerate() {

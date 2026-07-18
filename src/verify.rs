@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::error::VerifyError;
 use crate::globals::GlobalRegistry;
 use crate::ids::LoopId;
-use crate::ir::{IrBody, IrExpr, IrExprKind, IrFunction, IrModule, IrTopLevel};
+use crate::ir::{IrBody, IrExpr, IrExprKind, IrFunction, IrModule, IrQuasiDatum, IrTopLevel};
 
 pub fn verify_top_level(
     top_level: &IrTopLevel,
@@ -82,7 +82,28 @@ fn verify_expr(
     enclosing_loops: &[LoopId],
 ) -> Result<(), VerifyError> {
     match &expr.kind {
-        IrExprKind::Const(_) => Ok(()),
+        IrExprKind::Const(_) | IrExprKind::Quote(_) => Ok(()),
+        IrExprKind::QuasiQuote(template) => verify_quasi_datum(
+            template,
+            local_count,
+            capture_count,
+            module,
+            globals,
+            enclosing_loops,
+        ),
+        IrExprKind::Gensym { prefix } => {
+            if let Some(prefix) = prefix {
+                verify_expr(
+                    prefix,
+                    local_count,
+                    capture_count,
+                    module,
+                    globals,
+                    enclosing_loops,
+                )?;
+            }
+            Ok(())
+        }
         IrExprKind::LoadLocal(slot) => {
             if slot.index() as u32 >= local_count {
                 return Err(VerifyError::InvalidLocalSlot(*slot));
@@ -333,5 +354,39 @@ fn verify_expr(
             }
             Ok(())
         }
+    }
+}
+
+fn verify_quasi_datum(
+    template: &IrQuasiDatum,
+    local_count: u32,
+    capture_count: u32,
+    module: &IrModule,
+    globals: &GlobalRegistry,
+    enclosing_loops: &[LoopId],
+) -> Result<(), VerifyError> {
+    match template {
+        IrQuasiDatum::Datum(_) => Ok(()),
+        IrQuasiDatum::List(items) => {
+            for item in items {
+                verify_quasi_datum(
+                    item,
+                    local_count,
+                    capture_count,
+                    module,
+                    globals,
+                    enclosing_loops,
+                )?;
+            }
+            Ok(())
+        }
+        IrQuasiDatum::Evaluate(expression) => verify_expr(
+            expression,
+            local_count,
+            capture_count,
+            module,
+            globals,
+            enclosing_loops,
+        ),
     }
 }

@@ -31,6 +31,7 @@ pub enum HardwareError {
     InvalidConcat,
     InvalidResize,
     IndexOutOfRange { index: u32, width: u32 },
+    DatumNotHardwareValue,
     CombinationalLoop(String),
     InvalidIdentifier(String),
 }
@@ -965,6 +966,9 @@ fn lower_core_with_expected(
             )
         }
         CoreExprKind::List(items) => lower_application(items, props, env, expected),
+        CoreExprKind::Quote(_) | CoreExprKind::QuasiQuote(_) | CoreExprKind::GeneratedSymbol(_) => {
+            Err(HardwareError::DatumNotHardwareValue)
+        }
         _ => Err(HardwareError::UnsupportedExpression),
     }
 }
@@ -998,6 +1002,9 @@ fn lower_application(
     let CoreExprKind::Symbol(name) = head.kind() else {
         return Err(HardwareError::UnsupportedExpression);
     };
+    if matches!(name.as_str(), "quote" | "quasiquote" | "gensym") {
+        return Err(HardwareError::DatumNotHardwareValue);
+    }
     if name == "if" {
         let [condition, yes, no] = rest else {
             return Err(HardwareError::UnsupportedExpression);

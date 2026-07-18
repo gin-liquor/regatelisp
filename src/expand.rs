@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{Expr, ExprKind};
-use crate::core::{CoreExpr, CoreExprKind};
+use crate::core::{CoreExpr, CoreExprKind, QuasiDatum};
+use crate::datum::{Datum, expr_to_datum};
 use crate::error::ExpandError;
 use crate::property::{Properties, PropertyValue};
 
@@ -101,6 +102,10 @@ pub fn expand(expr: &Expr, context: &ExpansionContext) -> Result<CoreExpr, Expan
             CoreExprKind::Symbol(name.clone()),
             expr.properties().clone(),
         )),
+        ExprKind::GeneratedSymbol(symbol) => Ok(CoreExpr::with_properties(
+            CoreExprKind::GeneratedSymbol(symbol.clone()),
+            expr.properties().clone(),
+        )),
         ExprKind::List(items) => expand_list(expr, items, context),
     }
 }
@@ -123,6 +128,36 @@ fn expand_list(
                 source.properties().clone(),
             ));
         }
+        if name == "quote" {
+            let [quoted] = &items[1..] else {
+                return Err(ExpandError::InvalidQuoteSyntax {
+                    got: items.len() - 1,
+                });
+            };
+            return Ok(CoreExpr::with_properties(
+                CoreExprKind::Quote(expr_to_datum(quoted)),
+                source.properties().clone(),
+            ));
+        }
+        if name == "quasiquote" {
+            let [template] = &items[1..] else {
+                return Err(ExpandError::InvalidQuasiquoteSyntax {
+                    got: items.len() - 1,
+                });
+            };
+            return Ok(CoreExpr::with_properties(
+                CoreExprKind::QuasiQuote(expand_quasi_datum(template, context, 1)?),
+                source.properties().clone(),
+            ));
+        }
+        if name == "unquote" {
+            if items.len() != 2 {
+                return Err(ExpandError::InvalidUnquoteSyntax {
+                    got: items.len() - 1,
+                });
+            }
+            return Err(ExpandError::UnquoteOutsideQuasiquote);
+        }
     }
 
     let mut expanded = Vec::with_capacity(items.len());
@@ -132,6 +167,57 @@ fn expand_list(
     Ok(CoreExpr::with_properties(
         CoreExprKind::List(expanded),
         source.properties().clone(),
+    ))
+}
+
+fn expand_quasi_datum(
+    expression: &Expr,
+    context: &ExpansionContext,
+    depth: usize,
+) -> Result<QuasiDatum, ExpandError> {
+    let ExprKind::List(items) = expression.kind() else {
+        return Ok(QuasiDatum::Datum(expr_to_datum(expression)));
+    };
+    if let Some(ExprKind::Symbol(name)) = items.first().map(Expr::kind) {
+        match name.as_str() {
+            "quote" => {
+                // Inside a quasiquote template, quote is code data and
+                // shields every descendant from unquote processing.
+                return Ok(QuasiDatum::Datum(expr_to_datum(expression)));
+            }
+            "quasiquote" => {
+                let [template] = &items[1..] else {
+                    return Err(ExpandError::InvalidQuasiquoteSyntax {
+                        got: items.len() - 1,
+                    });
+                };
+                return Ok(QuasiDatum::List(vec![
+                    QuasiDatum::Datum(Datum::Symbol(crate::symbol::Symbol::interned("quasiquote"))),
+                    expand_quasi_datum(template, context, depth + 1)?,
+                ]));
+            }
+            "unquote" => {
+                let [value] = &items[1..] else {
+                    return Err(ExpandError::InvalidUnquoteSyntax {
+                        got: items.len() - 1,
+                    });
+                };
+                if depth == 1 {
+                    return Ok(QuasiDatum::Evaluate(Box::new(expand(value, context)?)));
+                }
+                return Ok(QuasiDatum::List(vec![
+                    QuasiDatum::Datum(Datum::Symbol(crate::symbol::Symbol::interned("unquote"))),
+                    expand_quasi_datum(value, context, depth - 1)?,
+                ]));
+            }
+            _ => {}
+        }
+    }
+    Ok(QuasiDatum::List(
+        items
+            .iter()
+            .map(|item| expand_quasi_datum(item, context, depth))
+            .collect::<Result<_, _>>()?,
     ))
 }
 
@@ -282,6 +368,7 @@ fn eval_constant_int(expr: &Expr, context: &ExpansionContext) -> Result<i64, Exp
                 .integer_constant(name)
                 .ok_or(ExpandError::NonConstantForBound)
         }
+        ExprKind::GeneratedSymbol(_) => Err(ExpandError::NonConstantForBound),
         ExprKind::List(items) => eval_constant_application(items, context),
     }
 }

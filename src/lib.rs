@@ -10,6 +10,7 @@ pub mod builtin;
 pub mod capture;
 pub mod compiler;
 pub mod core;
+pub mod datum;
 pub mod error;
 pub mod expand;
 pub mod format;
@@ -23,6 +24,7 @@ pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod property;
+pub mod symbol;
 pub mod text_ir;
 pub mod value;
 pub mod verify;
@@ -31,6 +33,7 @@ use crate::expand::ExpansionContext;
 
 pub use ast::{Expr, ExprKind};
 pub use core::{CoreExpr, CoreExprKind};
+pub use datum::{Datum, datum_to_expr, expr_to_datum};
 pub use error::{
     BackendError, EvalError, ExpandError, FormatError, LexError, LispError, LowerError, ParseError,
     VerifyError,
@@ -41,6 +44,7 @@ pub use interpreter::{FrontendSession, Interpreter};
 pub use ir::IrModule;
 pub use lexer::{SpannedToken, Token};
 pub use property::{Properties, PropertyValue};
+pub use symbol::{GensymId, Symbol};
 pub use value::{Builtin, Closure, Value};
 
 pub fn compile_systemverilog(source: &str) -> Result<String, hardware::HardwareError> {

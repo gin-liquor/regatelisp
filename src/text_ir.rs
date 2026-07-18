@@ -8,7 +8,9 @@
 use std::fmt::Write as _;
 
 use crate::globals::GlobalRegistry;
-use crate::ir::{IrCaptureSource, IrConst, IrExpr, IrExprKind, IrFunction, IrModule, IrTopLevel};
+use crate::ir::{
+    IrCaptureSource, IrConst, IrExpr, IrExprKind, IrFunction, IrModule, IrQuasiDatum, IrTopLevel,
+};
 
 pub fn format_ir_module(module: &IrModule, globals: &GlobalRegistry) -> String {
     let mut out = String::new();
@@ -92,6 +94,21 @@ fn format_expr_inline(
 ) {
     match &expr.kind {
         IrExprKind::Const(c) => format_const(out, c),
+        IrExprKind::Quote(datum) => {
+            let _ = write!(out, "quote {datum}");
+        }
+        IrExprKind::QuasiQuote(template) => {
+            out.push_str("quasiquote ");
+            format_quasi_datum(out, template, module, globals, depth);
+        }
+        IrExprKind::Gensym { prefix } => {
+            out.push_str("gensym");
+            if let Some(prefix) = prefix {
+                out.push('(');
+                format_expr_inline(out, prefix, module, globals, depth);
+                out.push(')');
+            }
+        }
         IrExprKind::LoadLocal(slot) => {
             let _ = write!(out, "local %{}", slot.0);
         }
@@ -230,6 +247,35 @@ fn format_expr_inline(
             }
             indent(out, depth);
             out.push('}');
+        }
+    }
+}
+
+fn format_quasi_datum(
+    out: &mut String,
+    template: &IrQuasiDatum,
+    module: &IrModule,
+    globals: &GlobalRegistry,
+    depth: usize,
+) {
+    match template {
+        IrQuasiDatum::Datum(datum) => {
+            let _ = write!(out, "{datum}");
+        }
+        IrQuasiDatum::List(items) => {
+            out.push('(');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    out.push(' ');
+                }
+                format_quasi_datum(out, item, module, globals, depth);
+            }
+            out.push(')');
+        }
+        IrQuasiDatum::Evaluate(expression) => {
+            out.push_str("(evaluate ");
+            format_expr_inline(out, expression, module, globals, depth);
+            out.push(')');
         }
     }
 }

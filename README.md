@@ -144,3 +144,38 @@ assignments still reject implicit width or signedness conversions.
 Get-Content -Raw examples/vector_ops_sv.lisp |
     cargo run --quiet -- --emit-systemverilog
 ```
+
+## Code data and generated symbols (Stage 8)
+
+`quote` returns source structure as a `Datum` without evaluating it. `quasiquote`
+does the same except that an `unquote` at the matching nesting depth is evaluated
+and converted back into code data:
+
+```lisp
+(quote (+ 1 2))
+
+(let ((value 42))
+  (quasiquote
+    (assign result (unquote value))))
+```
+
+`gensym` returns a generated symbol with identity distinct from every ordinary
+symbol and from every other generated symbol. Its optional prefix must evaluate
+to an ordinary symbol Datum:
+
+```lisp
+(gensym)
+(gensym (quote temporary))
+```
+
+Generated-symbol numbering belongs to one evaluation session, so a fresh
+interpreter starts deterministically at `g__g0`. Datum conversion is structural,
+does not reparse text, and intentionally drops syntax properties.
+
+Only the full S-expression forms are supported; reader abbreviations such as
+quote/backquote/comma and `unquote-splicing` are not implemented. Macros are
+reserved for Stage 9, and syntax-object/property APIs for Stage 9.5.
+
+```powershell
+Get-Content -Raw examples/quasiquote.lisp | cargo run --quiet
+```

@@ -5,6 +5,7 @@
 //! to eventually translate to other backends without a separate
 //! flattening pass.
 
+use crate::datum::Datum;
 use crate::error::Span;
 use crate::ids::{CaptureSlot, FunctionId, GlobalId, LocalSlot, LoopId};
 
@@ -62,6 +63,11 @@ impl IrExpr {
 #[derive(Debug, Clone)]
 pub enum IrExprKind {
     Const(IrConst),
+    Quote(Datum),
+    QuasiQuote(IrQuasiDatum),
+    Gensym {
+        prefix: Option<Box<IrExpr>>,
+    },
 
     LoadLocal(LocalSlot),
     LoadCapture(CaptureSlot),
@@ -111,6 +117,13 @@ pub enum IrExprKind {
     },
 
     Sequence(Vec<IrExpr>),
+}
+
+#[derive(Debug, Clone)]
+pub enum IrQuasiDatum {
+    Datum(Datum),
+    List(Vec<IrQuasiDatum>),
+    Evaluate(Box<IrExpr>),
 }
 
 /// The body of a function or a top-level expression: a `local_count`-sized

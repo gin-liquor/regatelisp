@@ -8,7 +8,8 @@ use regatelisp::compiler::Compiler;
 use regatelisp::error::{Span, VerifyError};
 use regatelisp::ids::{CaptureSlot, FunctionId, GlobalId, LocalSlot, LoopId};
 use regatelisp::ir::{
-    IrBody, IrCaptureSource, IrConst, IrExpr, IrExprKind, IrFunction, IrModule, IrTopLevel,
+    IrBody, IrCaptureSource, IrConst, IrExpr, IrExprKind, IrFunction, IrModule, IrQuasiDatum,
+    IrTopLevel,
 };
 use regatelisp::{GlobalRegistry, Interpreter, Value};
 
@@ -296,6 +297,7 @@ fn contains_for_shaped_node(expr: &IrExpr) -> bool {
     // test a concrete assertion to hang the invariant on.
     match &expr.kind {
         IrExprKind::Const(_)
+        | IrExprKind::Quote(_)
         | IrExprKind::LoadLocal(_)
         | IrExprKind::LoadCapture(_)
         | IrExprKind::LoadGlobal(_) => false,
@@ -306,6 +308,8 @@ fn contains_for_shaped_node(expr: &IrExpr) -> bool {
                 || contains_for_shaped_node(body)
         }
         IrExprKind::MakeClosure { .. } => false,
+        IrExprKind::QuasiQuote(template) => contains_for_in_quasi_datum(template),
+        IrExprKind::Gensym { prefix } => prefix.as_deref().is_some_and(contains_for_shaped_node),
         IrExprKind::Call { callee, arguments } => {
             contains_for_shaped_node(callee) || arguments.iter().any(contains_for_shaped_node)
         }
@@ -346,6 +350,14 @@ fn contains_for_shaped_node(expr: &IrExpr) -> bool {
         }
         IrExprKind::Break { value, .. } => value.as_deref().is_some_and(contains_for_shaped_node),
         IrExprKind::Sequence(items) => items.iter().any(contains_for_shaped_node),
+    }
+}
+
+fn contains_for_in_quasi_datum(template: &IrQuasiDatum) -> bool {
+    match template {
+        IrQuasiDatum::Datum(_) => false,
+        IrQuasiDatum::List(items) => items.iter().any(contains_for_in_quasi_datum),
+        IrQuasiDatum::Evaluate(expression) => contains_for_shaped_node(expression),
     }
 }
 
