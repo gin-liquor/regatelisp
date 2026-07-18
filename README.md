@@ -108,3 +108,19 @@ For a complete counter example:
 Get-Content -Raw examples/wrapping_counter_sv.lisp |
     cargo run --quiet -- --emit-systemverilog
 ```
+
+## FSM enums and cases (Stage 6)
+
+Module-local `enum` declarations define fixed-width unsigned symbolic constants.
+They are emitted as `localparam logic`; they are not nominal enum types.
+
+Value-producing `case` requires a final `else` and emits deterministic nested
+conditional expressions. Inside `clocked`, `case-do` emits a SystemVerilog `case`
+statement. Omitting its `else` retains register values when no key matches.
+Different arms may update the same register, while duplicate updates on one
+execution path are rejected.
+
+```powershell
+Get-Content -Raw examples/fsm_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
+```

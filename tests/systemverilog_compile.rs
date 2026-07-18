@@ -1,7 +1,7 @@
 use regatelisp::compile_systemverilog;
 use regatelisp::hardware::{
-    HwDesign, HwExpr, HwExprKind, HwModule, HwPort, HwPortDirection, HwSignalId, HwSignalRef,
-    HwType, verify_hardware_design,
+    HwDesign, HwEnum, HwEnumId, HwEnumMember, HwEnumMemberId, HwExpr, HwExprKind, HwModule, HwPort,
+    HwPortDirection, HwSignalId, HwSignalRef, HwType, verify_hardware_design,
 };
 use regatelisp::property::Properties;
 
@@ -144,6 +144,7 @@ fn verifier_rejects_a_mux_with_a_multi_bit_condition() {
             }],
             registers: vec![],
             clocked_blocks: vec![],
+            enums: vec![],
             properties: Properties::new(),
         }],
     };
@@ -169,4 +170,98 @@ fn clocked_driver_conflicts_and_duplicate_path_updates_are_rejected() {
     for source in [duplicate, two_blocks, assign_and_set] {
         assert!(compile_systemverilog(source).is_err(), "accepted {source}");
     }
+}
+
+#[test]
+fn emits_enum_expression_case_and_statement_case_for_fsm() {
+    let source = include_str!("../examples/fsm_sv.lisp");
+    let output = compile_systemverilog(source).unwrap();
+    assert!(output.contains("localparam logic [1:0] STATE_IDLE = 2'd0;"));
+    assert!(output.contains("localparam logic [1:0] STATE_RUN = 2'd1;"));
+    assert!(output.contains("state <= STATE_RUN;"));
+    assert!(output.contains("assign status = ((state == STATE_IDLE) ? 2'd0"));
+    assert!(output.contains("case (state)"));
+    assert!(output.contains("STATE_DONE: begin"));
+    assert!(output.contains("default: begin"));
+    assert!(output.contains("endcase"));
+}
+
+#[test]
+fn rejects_duplicate_case_keys_and_same_arm_double_set() {
+    let duplicate_key = "(module bad (ports (input (meta ((width 2)) state)) (output (meta ((width 1)) y))) (enum State 2 (IDLE 0)) (assign y (case state (IDLE 0) (0 1) (else 0))))";
+    let duplicate_set = "(module bad (ports (input (meta ((width 1)) clk)) (output (meta ((width 2)) state))) (enum State 2 (IDLE 0)) (register state) (clocked (clock clk rising) (case-do state (IDLE (do (set state 0) (set state 1))))))";
+    let set_after_case = "(module bad (ports (input (meta ((width 1)) clk)) (output (meta ((width 2)) state))) (enum State 2 (IDLE 0)) (register state) (clocked (clock clk rising) (do (case-do state (IDLE (set state 1))) (set state 0))))";
+    assert!(compile_systemverilog(duplicate_key).is_err());
+    assert!(compile_systemverilog(duplicate_set).is_err());
+    assert!(compile_systemverilog(set_after_case).is_err());
+}
+
+#[test]
+fn rejects_invalid_enum_declarations_and_case_shapes() {
+    let width_zero =
+        "(module bad (ports (output (meta ((width 1)) y))) (enum State 0 (IDLE 0)) (assign y 0))";
+    let out_of_range =
+        "(module bad (ports (output (meta ((width 1)) y))) (enum State 1 (IDLE 2)) (assign y 0))";
+    let duplicate_value = "(module bad (ports (output (meta ((width 1)) y))) (enum State 1 (IDLE 0) (RUN 0)) (assign y 0))";
+    let missing_else = "(module bad (ports (input (meta ((width 1)) s)) (output (meta ((width 1)) y))) (assign y (case s (0 0))))";
+    let misplaced_else = "(module bad (ports (input (meta ((width 1)) s)) (output (meta ((width 1)) y))) (assign y (case s (else 0) (0 1))))";
+    for source in [
+        width_zero,
+        out_of_range,
+        duplicate_value,
+        missing_else,
+        misplaced_else,
+    ] {
+        assert!(compile_systemverilog(source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn verifier_rejects_invalid_or_retyped_enum_member_ir() {
+    let byte = HwType {
+        width: 8,
+        signed: false,
+    };
+    let bit = HwType {
+        width: 1,
+        signed: false,
+    };
+    let make_design = |enum_id, expression_type| HwDesign {
+        modules: vec![HwModule {
+            name: "bad_enum_ir".into(),
+            ports: vec![HwPort {
+                direction: HwPortDirection::Output,
+                name: "y".into(),
+                ty: byte,
+                properties: Properties::new(),
+            }],
+            assignments: vec![regatelisp::hardware::HwAssignment {
+                destination: HwSignalRef { id: HwSignalId(0) },
+                value: HwExpr {
+                    kind: HwExprKind::EnumMember(HwEnumMemberId {
+                        enum_id: HwEnumId(enum_id),
+                        member_index: 0,
+                    }),
+                    ty: expression_type,
+                    properties: Properties::new(),
+                },
+                properties: Properties::new(),
+            }],
+            registers: vec![],
+            clocked_blocks: vec![],
+            enums: vec![HwEnum {
+                name: "State".into(),
+                ty: bit,
+                members: vec![HwEnumMember {
+                    name: "IDLE".into(),
+                    value: 0,
+                    properties: Properties::new(),
+                }],
+                properties: Properties::new(),
+            }],
+            properties: Properties::new(),
+        }],
+    };
+    assert!(verify_hardware_design(&make_design(0, byte)).is_err());
+    assert!(verify_hardware_design(&make_design(99, byte)).is_err());
 }

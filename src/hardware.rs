@@ -52,6 +52,31 @@ pub struct HwSignalId(pub usize);
 pub struct HwSignalRef {
     pub id: HwSignalId,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HwEnumId(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HwEnumMemberId {
+    pub enum_id: HwEnumId,
+    pub member_index: usize,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwEnumMember {
+    pub name: String,
+    pub value: i64,
+    pub properties: Properties,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwEnum {
+    pub name: String,
+    pub ty: HwType,
+    pub members: Vec<HwEnumMember>,
+    pub properties: Properties,
+}
+type EnumMemberLookup = HashMap<String, (HwEnumMemberId, HwType, i64)>;
+struct HwLowerEnv<'a> {
+    signals: &'a HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    enum_members: &'a EnumMemberLookup,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HwUnaryOp {
     BitNot,
@@ -74,8 +99,20 @@ pub enum HwCompareOp {
     GreaterEqual,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HwCaseKey {
+    Constant { value: i64, ty: HwType },
+    EnumMember(HwEnumMemberId),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwCaseExprArm {
+    pub key: HwCaseKey,
+    pub value: HwExpr,
+    pub properties: Properties,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HwExprKind {
     Reference(HwSignalRef),
+    EnumMember(HwEnumMemberId),
     Constant(i64),
     Unary {
         op: HwUnaryOp,
@@ -95,6 +132,11 @@ pub enum HwExprKind {
         condition: Box<HwExpr>,
         then_expr: Box<HwExpr>,
         else_expr: Box<HwExpr>,
+    },
+    Case {
+        selector: Box<HwExpr>,
+        arms: Vec<HwCaseExprArm>,
+        default: Box<HwExpr>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +201,18 @@ pub enum HwStmt {
         statements: Vec<HwStmt>,
         properties: Properties,
     },
+    Case {
+        selector: HwExpr,
+        arms: Vec<HwCaseStmtArm>,
+        default: Option<Box<HwStmt>>,
+        properties: Properties,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwCaseStmtArm {
+    pub key: HwCaseKey,
+    pub body: Box<HwStmt>,
+    pub properties: Properties,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HwClockedBlock {
@@ -174,6 +228,7 @@ pub struct HwModule {
     pub assignments: Vec<HwAssignment>,
     pub registers: Vec<HwRegister>,
     pub clocked_blocks: Vec<HwClockedBlock>,
+    pub enums: Vec<HwEnum>,
     pub properties: Properties,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -232,6 +287,7 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
     let mut register_forms = None;
     let mut direct_registers = Vec::new();
     let mut clocked_forms = Vec::new();
+    let mut enum_forms = Vec::new();
     let mut statements = Vec::new();
     for item in rest {
         let form = list(item)?;
@@ -250,6 +306,8 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
         } else if matches!(form.first().map(|x| x.kind()), Some(ExprKind::Symbol(x)) if x=="clocked")
         {
             clocked_forms.push(item);
+        } else if matches!(form.first().map(|x| x.kind()), Some(ExprKind::Symbol(x)) if x=="enum") {
+            enum_forms.push(item);
         } else {
             statements.push(item)
         }
@@ -290,6 +348,7 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
         .enumerate()
         .map(|(i, p)| (p.name.clone(), (HwSignalId(i), p.ty, p.direction)))
         .collect();
+    let (enums, enum_members) = lower_enums(&enum_forms, &names)?;
     let mut registers = Vec::new();
     if let Some(forms) = register_forms {
         for register in &forms[1..] {
@@ -370,7 +429,14 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                             return Err(HardwareError::InvalidModule);
                         };
                         if next
-                            .replace(lower_expr_expected(value, &lookup, register.ty)?)
+                            .replace(lower_expr_expected(
+                                value,
+                                &HwLowerEnv {
+                                    signals: &lookup,
+                                    enum_members: &enum_members,
+                                },
+                                register.ty,
+                            )?)
                             .is_some()
                         {
                             return Err(HardwareError::InvalidModule);
@@ -380,7 +446,16 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                         let [_, value] = parts else {
                             return Err(HardwareError::InvalidModule);
                         };
-                        if enable.replace(lower_expr(value, &lookup)?).is_some() {
+                        if enable
+                            .replace(lower_expr(
+                                value,
+                                &HwLowerEnv {
+                                    signals: &lookup,
+                                    enum_members: &enum_members,
+                                },
+                            )?)
+                            .is_some()
+                        {
                             return Err(HardwareError::InvalidModule);
                         }
                     }
@@ -412,7 +487,14 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                             .replace(HwReset {
                                 signal: id,
                                 active_level,
-                                value: lower_reset_value(value, &lookup, register.ty)?,
+                                value: lower_reset_value(
+                                    value,
+                                    &HwLowerEnv {
+                                        signals: &lookup,
+                                        enum_members: &enum_members,
+                                    },
+                                    register.ty,
+                                )?,
                             })
                             .is_some()
                         {
@@ -504,7 +586,14 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                         return Err(HardwareError::InvalidModule);
                     };
                     if next
-                        .replace(lower_expr_expected(value, &lookup, ty)?)
+                        .replace(lower_expr_expected(
+                            value,
+                            &HwLowerEnv {
+                                signals: &lookup,
+                                enum_members: &enum_members,
+                            },
+                            ty,
+                        )?)
                         .is_some()
                     {
                         return Err(HardwareError::InvalidModule);
@@ -514,7 +603,16 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                     let [_, value] = parts else {
                         return Err(HardwareError::InvalidModule);
                     };
-                    if enable.replace(lower_expr(value, &lookup)?).is_some() {
+                    if enable
+                        .replace(lower_expr(
+                            value,
+                            &HwLowerEnv {
+                                signals: &lookup,
+                                enum_members: &enum_members,
+                            },
+                        )?)
+                        .is_some()
+                    {
                         return Err(HardwareError::InvalidModule);
                     }
                 }
@@ -539,7 +637,14 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
                         .replace(HwReset {
                             signal: reset_id,
                             active_level: HwActiveLevel::High,
-                            value: lower_reset_value(value, &lookup, ty)?,
+                            value: lower_reset_value(
+                                value,
+                                &HwLowerEnv {
+                                    signals: &lookup,
+                                    enum_members: &enum_members,
+                                },
+                                ty,
+                            )?,
                         })
                         .is_some()
                     {
@@ -605,7 +710,15 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
     }
     let mut clocked_blocks = Vec::new();
     for form_expr in clocked_forms {
-        clocked_blocks.push(lower_clocked(form_expr, &lookup, &registers, result.len())?);
+        clocked_blocks.push(lower_clocked(
+            form_expr,
+            &HwLowerEnv {
+                signals: &lookup,
+                enum_members: &enum_members,
+            },
+            &registers,
+            result.len(),
+        )?);
     }
     let mut assignments = Vec::new();
     for statement in statements {
@@ -635,7 +748,14 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
         {
             return Err(HardwareError::DuplicateAssignment(destination));
         };
-        let value = lower_expr_expected(value, &lookup, ty)?;
+        let value = lower_expr_expected(
+            value,
+            &HwLowerEnv {
+                signals: &lookup,
+                enum_members: &enum_members,
+            },
+            ty,
+        )?;
         if value.ty != ty {
             return Err(HardwareError::TypeMismatch);
         };
@@ -651,6 +771,7 @@ fn lower_module(expr: &Expr) -> Result<HwModule, HardwareError> {
         assignments,
         registers,
         clocked_blocks,
+        enums,
         properties: expr.properties().clone(),
     })
 }
@@ -673,64 +794,135 @@ fn type_from_properties(properties: &Properties, name: &str) -> Result<HwType, H
     };
     Ok(HwType { width, signed })
 }
-fn lower_expr(
-    expr: &Expr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
-) -> Result<HwExpr, HardwareError> {
+fn lower_enums(
+    forms: &[&Expr],
+    signal_names: &HashSet<String>,
+) -> Result<(Vec<HwEnum>, EnumMemberLookup), HardwareError> {
+    let mut enums = Vec::new();
+    let mut members = HashMap::new();
+    let mut member_names = HashSet::new();
+    let mut enum_names = HashSet::new();
+    for expression in forms {
+        let form = list(expression)?;
+        let [_, name_expr, width_expr, member_forms @ ..] = form else {
+            return Err(HardwareError::InvalidModule);
+        };
+        let name = symbol(name_expr)?.to_string();
+        let ExprKind::Int(width) = width_expr.kind() else {
+            return Err(HardwareError::InvalidModule);
+        };
+        let width = u32::try_from(*width)
+            .ok()
+            .filter(|width| *width > 0)
+            .ok_or_else(|| HardwareError::InvalidWidth(name.clone()))?;
+        if !valid_identifier(&name)
+            || !enum_names.insert(name.to_ascii_lowercase())
+            || member_forms.is_empty()
+        {
+            return Err(HardwareError::InvalidIdentifier(name));
+        }
+        let ty = HwType {
+            width,
+            signed: false,
+        };
+        let enum_id = HwEnumId(enums.len());
+        let mut enum_members = Vec::new();
+        let mut values = HashSet::new();
+        for member_expr in member_forms {
+            let [member_name, value_expr] = list(member_expr)? else {
+                return Err(HardwareError::InvalidModule);
+            };
+            let member_name = symbol(member_name)?.to_string();
+            let ExprKind::Int(value) = value_expr.kind() else {
+                return Err(HardwareError::InvalidModule);
+            };
+            if !valid_identifier(&member_name)
+                || signal_names.contains(&member_name.to_ascii_lowercase())
+                || !member_names.insert(member_name.to_ascii_lowercase())
+                || !values.insert(*value)
+                || !fits(*value, ty)
+            {
+                return Err(HardwareError::InvalidModule);
+            }
+            let id = HwEnumMemberId {
+                enum_id,
+                member_index: enum_members.len(),
+            };
+            members.insert(member_name.clone(), (id, ty, *value));
+            enum_members.push(HwEnumMember {
+                name: member_name,
+                value: *value,
+                properties: member_expr.properties().clone(),
+            });
+        }
+        enums.push(HwEnum {
+            name,
+            ty,
+            members: enum_members,
+            properties: expression.properties().clone(),
+        });
+    }
+    Ok((enums, members))
+}
+fn lower_expr(expr: &Expr, env: &HwLowerEnv<'_>) -> Result<HwExpr, HardwareError> {
     let c = NoConstants;
     let core = expand::expand(expr, &ExpansionContext::new(&c))
         .map_err(|_| HardwareError::UnsupportedExpression)?;
-    lower_core(&core, signals)
+    lower_core(&core, env)
 }
 
 fn lower_expr_expected(
     expr: &Expr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     expected: HwType,
 ) -> Result<HwExpr, HardwareError> {
     let c = NoConstants;
     let core = expand::expand(expr, &ExpansionContext::new(&c))
         .map_err(|_| HardwareError::UnsupportedExpression)?;
-    lower_core_expected(&core, signals, expected)
+    lower_core_expected(&core, env, expected)
 }
 
 fn lower_reset_value(
     expression: &Expr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     ty: HwType,
 ) -> Result<HwExpr, HardwareError> {
-    lower_expr_expected(expression, signals, ty)
+    lower_expr_expected(expression, env, ty)
 }
-fn lower_core(
-    core: &CoreExpr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
-) -> Result<HwExpr, HardwareError> {
-    lower_core_with_expected(core, signals, None)
+fn lower_core(core: &CoreExpr, env: &HwLowerEnv<'_>) -> Result<HwExpr, HardwareError> {
+    lower_core_with_expected(core, env, None)
 }
 
 fn lower_core_expected(
     core: &CoreExpr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     expected: HwType,
 ) -> Result<HwExpr, HardwareError> {
-    lower_core_with_expected(core, signals, Some(expected))
+    lower_core_with_expected(core, env, Some(expected))
 }
 
 fn lower_core_with_expected(
     core: &CoreExpr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     expected: Option<HwType>,
 ) -> Result<HwExpr, HardwareError> {
     let props = core.properties().clone();
     match core.kind() {
         CoreExprKind::Symbol(name) => {
-            let Some((id, ty, _)) = signals.get(name) else {
+            let value = if let Some((id, ty, _)) = env.signals.get(name) {
+                HwExpr {
+                    kind: HwExprKind::Reference(HwSignalRef { id: *id }),
+                    ty: *ty,
+                    properties: props,
+                }
+            } else if let Some((id, ty, _)) = env.enum_members.get(name) {
+                HwExpr {
+                    kind: HwExprKind::EnumMember(*id),
+                    ty: *ty,
+                    properties: props,
+                }
+            } else {
                 return Err(HardwareError::UnknownSignal(name.clone()));
-            };
-            let value = HwExpr {
-                kind: HwExprKind::Reference(HwSignalRef { id: *id }),
-                ty: *ty,
-                properties: props,
             };
             require_type(value, expected)
         }
@@ -751,7 +943,7 @@ fn lower_core_with_expected(
                 expected,
             )
         }
-        CoreExprKind::List(items) => lower_application(items, props, signals, expected),
+        CoreExprKind::List(items) => lower_application(items, props, env, expected),
         _ => Err(HardwareError::UnsupportedExpression),
     }
 }
@@ -776,7 +968,7 @@ fn fits(value: i64, ty: HwType) -> bool {
 fn lower_application(
     items: &[CoreExpr],
     properties: Properties,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     expected: Option<HwType>,
 ) -> Result<HwExpr, HardwareError> {
     let [head, rest @ ..] = items else {
@@ -789,24 +981,24 @@ fn lower_application(
         let [condition, yes, no] = rest else {
             return Err(HardwareError::UnsupportedExpression);
         };
-        let condition = lower_core(condition, signals)?;
+        let condition = lower_core(condition, env)?;
         if condition.ty.width != 1 {
             return Err(HardwareError::InvalidCondition);
         };
         let (then_expr, else_expr) = if let Some(expected) = expected {
             (
-                lower_core_expected(yes, signals, expected)?,
-                lower_core_expected(no, signals, expected)?,
+                lower_core_expected(yes, env, expected)?,
+                lower_core_expected(no, env, expected)?,
             )
         } else {
-            match lower_core(yes, signals) {
+            match lower_core(yes, env) {
                 Ok(then_expr) => (
                     then_expr.clone(),
-                    lower_core_expected(no, signals, then_expr.ty)?,
+                    lower_core_expected(no, env, then_expr.ty)?,
                 ),
                 Err(HardwareError::UntypedConstant) => {
-                    let else_expr = lower_core(no, signals)?;
-                    (lower_core_expected(yes, signals, else_expr.ty)?, else_expr)
+                    let else_expr = lower_core(no, env)?;
+                    (lower_core_expected(yes, env, else_expr.ty)?, else_expr)
                 }
                 Err(error) => return Err(error),
             }
@@ -822,13 +1014,91 @@ fn lower_application(
             properties,
         });
     };
+    if name == "case" {
+        let [selector, arms @ ..] = rest else {
+            return Err(HardwareError::UnsupportedExpression);
+        };
+        if arms.len() < 2 {
+            return Err(HardwareError::UnsupportedExpression);
+        }
+        let selector = lower_core(selector, env)?;
+        let mut lowered = Vec::new();
+        let mut default_core = None;
+        let mut keys = HashSet::new();
+        for (index, arm) in arms.iter().enumerate() {
+            let CoreExprKind::List(parts) = arm.kind() else {
+                return Err(HardwareError::UnsupportedExpression);
+            };
+            let [key, value] = parts.as_slice() else {
+                return Err(HardwareError::UnsupportedExpression);
+            };
+            if matches!(key.kind(), CoreExprKind::Symbol(name) if name == "else") {
+                if index + 1 != arms.len() || default_core.replace(value).is_some() {
+                    return Err(HardwareError::UnsupportedExpression);
+                }
+                continue;
+            }
+            let (case_key, numeric) = match key.kind() {
+                CoreExprKind::Int(value) if fits(*value, selector.ty) => (
+                    HwCaseKey::Constant {
+                        value: *value,
+                        ty: selector.ty,
+                    },
+                    *value,
+                ),
+                CoreExprKind::Symbol(name) => {
+                    let Some((id, ty, numeric)) = env.enum_members.get(name) else {
+                        return Err(HardwareError::UnknownSignal(name.clone()));
+                    };
+                    if *ty != selector.ty {
+                        return Err(HardwareError::TypeMismatch);
+                    }
+                    (HwCaseKey::EnumMember(*id), *numeric)
+                }
+                _ => return Err(HardwareError::UnsupportedExpression),
+            };
+            if !keys.insert(numeric) {
+                return Err(HardwareError::DuplicateAssignment("case key".into()));
+            }
+            lowered.push((case_key, value, arm.properties().clone()));
+        }
+        let default_core = default_core.ok_or(HardwareError::UnsupportedExpression)?;
+        let result_ty = if let Some(expected) = expected {
+            expected
+        } else {
+            let (_, first, _) = lowered
+                .first()
+                .ok_or(HardwareError::UnsupportedExpression)?;
+            lower_core(first, env)?.ty
+        };
+        let arms = lowered
+            .into_iter()
+            .map(|(key, value, properties)| {
+                Ok(HwCaseExprArm {
+                    key,
+                    value: lower_core_expected(value, env, result_ty)?,
+                    properties,
+                })
+            })
+            .collect::<Result<Vec<_>, HardwareError>>()?;
+        let default = lower_core_expected(default_core, env, result_ty)?;
+        return Ok(HwExpr {
+            kind: HwExprKind::Case {
+                selector: Box::new(selector),
+                arms,
+                default: Box::new(default),
+            },
+            ty: result_ty,
+            properties,
+        });
+    }
     if name == "bit-not" {
         let [operand] = rest else {
             return Err(HardwareError::UnsupportedExpression);
         };
         let operand = match expected {
-            Some(expected) => lower_core_expected(operand, signals, expected)?,
-            None => lower_core(operand, signals)?,
+            Some(expected) => lower_core_expected(operand, env, expected)?,
+            None => lower_core(operand, env)?,
         };
         let ty = operand.ty;
         return require_type(
@@ -855,11 +1125,11 @@ fn lower_application(
         ">=" => Some(HwCompareOp::GreaterEqual),
         _ => None,
     };
-    let (lhs, rhs) = match lower_core(lhs, signals) {
-        Ok(lhs) => (lhs.clone(), lower_core_expected(rhs, signals, lhs.ty)?),
+    let (lhs, rhs) = match lower_core(lhs, env) {
+        Ok(lhs) => (lhs.clone(), lower_core_expected(rhs, env, lhs.ty)?),
         Err(HardwareError::UntypedConstant) if comparison.is_some() => {
-            let rhs = lower_core(rhs, signals)?;
-            (lower_core_expected(lhs, signals, rhs.ty)?, rhs)
+            let rhs = lower_core(rhs, env)?;
+            (lower_core_expected(lhs, env, rhs.ty)?, rhs)
         }
         Err(HardwareError::UntypedConstant) => return Err(HardwareError::UntypedConstant),
         Err(error) => return Err(error),
@@ -912,7 +1182,7 @@ fn lower_application(
 
 fn lower_clocked(
     expression: &Expr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     registers: &[HwRegister],
     port_count: usize,
 ) -> Result<HwClockedBlock, HardwareError> {
@@ -931,7 +1201,7 @@ fn lower_clocked(
         return Err(HardwareError::InvalidModule);
     }
     let clock_name = symbol(clock_name)?;
-    let Some((clock, ty, direction)) = signals.get(clock_name).copied() else {
+    let Some((clock, ty, direction)) = env.signals.get(clock_name).copied() else {
         return Err(HardwareError::UnknownSignal(clock_name.into()));
     };
     if direction != HwPortDirection::Input
@@ -951,24 +1221,24 @@ fn lower_clocked(
     Ok(HwClockedBlock {
         clock,
         edge,
-        body: lower_stmt_list(statements, signals, registers, port_count)?,
+        body: lower_stmt_list(statements, env, registers, port_count)?,
         properties: expression.properties().clone(),
     })
 }
 
 fn lower_stmt_list(
     items: &[Expr],
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     registers: &[HwRegister],
     port_count: usize,
 ) -> Result<HwStmt, HardwareError> {
     if items.len() == 1 {
-        lower_stmt(&items[0], signals, registers, port_count)
+        lower_stmt(&items[0], env, registers, port_count)
     } else {
         Ok(HwStmt::Block {
             statements: items
                 .iter()
-                .map(|item| lower_stmt(item, signals, registers, port_count))
+                .map(|item| lower_stmt(item, env, registers, port_count))
                 .collect::<Result<_, _>>()?,
             properties: Properties::new(),
         })
@@ -977,7 +1247,7 @@ fn lower_stmt_list(
 
 fn lower_stmt(
     expr: &Expr,
-    signals: &HashMap<String, (HwSignalId, HwType, HwPortDirection)>,
+    env: &HwLowerEnv<'_>,
     registers: &[HwRegister],
     port_count: usize,
 ) -> Result<HwStmt, HardwareError> {
@@ -991,7 +1261,7 @@ fn lower_stmt(
                 return Err(HardwareError::InvalidModule);
             };
             let name = symbol(target)?;
-            let Some((id, ty, _)) = signals.get(name).copied() else {
+            let Some((id, ty, _)) = env.signals.get(name).copied() else {
                 return Err(HardwareError::UnknownSignal(name.into()));
             };
             if !registers.iter().any(|r| r.name == name)
@@ -1001,7 +1271,7 @@ fn lower_stmt(
             }
             Ok(HwStmt::Set {
                 target: id,
-                value: lower_expr_expected(value, signals, ty)?,
+                value: lower_expr_expected(value, env, ty)?,
                 properties: expr.properties().clone(),
             })
         }
@@ -1012,7 +1282,7 @@ fn lower_stmt(
             Ok(HwStmt::Block {
                 statements: form[1..]
                     .iter()
-                    .map(|item| lower_stmt(item, signals, registers, port_count))
+                    .map(|item| lower_stmt(item, env, registers, port_count))
                     .collect::<Result<_, _>>()?,
                 properties: expr.properties().clone(),
             })
@@ -1021,7 +1291,7 @@ fn lower_stmt(
             let ([_, condition, then_branch] | [_, condition, then_branch, _]) = form else {
                 return Err(HardwareError::InvalidModule);
             };
-            let condition = lower_expr(condition, signals)?;
+            let condition = lower_expr(condition, env)?;
             if condition.ty
                 != (HwType {
                     width: 1,
@@ -1031,16 +1301,75 @@ fn lower_stmt(
                 return Err(HardwareError::InvalidCondition);
             }
             let else_branch = if form.len() == 4 {
-                Some(Box::new(lower_stmt(
-                    &form[3], signals, registers, port_count,
-                )?))
+                Some(Box::new(lower_stmt(&form[3], env, registers, port_count)?))
             } else {
                 None
             };
             Ok(HwStmt::If {
                 condition,
-                then_branch: Box::new(lower_stmt(then_branch, signals, registers, port_count)?),
+                then_branch: Box::new(lower_stmt(then_branch, env, registers, port_count)?),
                 else_branch,
+                properties: expr.properties().clone(),
+            })
+        }
+        "case-do" => {
+            let [_, selector_expr, arm_exprs @ ..] = form else {
+                return Err(HardwareError::InvalidModule);
+            };
+            if arm_exprs.is_empty() {
+                return Err(HardwareError::InvalidModule);
+            }
+            let selector = lower_expr(selector_expr, env)?;
+            let mut arms = Vec::new();
+            let mut default = None;
+            let mut keys = HashSet::new();
+            for (index, arm_expr) in arm_exprs.iter().enumerate() {
+                let parts = list(arm_expr)?;
+                let [key_expr, body_expr] = parts else {
+                    return Err(HardwareError::InvalidModule);
+                };
+                if matches!(key_expr.kind(), ExprKind::Symbol(name) if name == "else") {
+                    if index + 1 != arm_exprs.len()
+                        || default
+                            .replace(Box::new(lower_stmt(body_expr, env, registers, port_count)?))
+                            .is_some()
+                    {
+                        return Err(HardwareError::InvalidModule);
+                    }
+                    continue;
+                }
+                let (key, numeric) = match key_expr.kind() {
+                    ExprKind::Int(value) if fits(*value, selector.ty) => (
+                        HwCaseKey::Constant {
+                            value: *value,
+                            ty: selector.ty,
+                        },
+                        *value,
+                    ),
+                    ExprKind::Symbol(name) => {
+                        let Some((id, ty, value)) = env.enum_members.get(name) else {
+                            return Err(HardwareError::UnknownSignal(name.clone()));
+                        };
+                        if *ty != selector.ty {
+                            return Err(HardwareError::TypeMismatch);
+                        }
+                        (HwCaseKey::EnumMember(*id), *value)
+                    }
+                    _ => return Err(HardwareError::InvalidModule),
+                };
+                if !keys.insert(numeric) {
+                    return Err(HardwareError::DuplicateAssignment("case key".into()));
+                }
+                arms.push(HwCaseStmtArm {
+                    key,
+                    body: Box::new(lower_stmt(body_expr, env, registers, port_count)?),
+                    properties: arm_expr.properties().clone(),
+                });
+            }
+            Ok(HwStmt::Case {
+                selector,
+                arms,
+                default,
                 properties: expr.properties().clone(),
             })
         }
@@ -1054,6 +1383,39 @@ pub fn verify_hardware_design(design: &HwDesign) -> Result<(), HardwareError> {
         if !modules.insert(module.name.clone()) {
             return Err(HardwareError::DuplicateModule(module.name.clone()));
         };
+        let mut declaration_names: HashSet<String> = module
+            .ports
+            .iter()
+            .map(|port| port.name.to_ascii_lowercase())
+            .collect();
+        let mut enum_names = HashSet::new();
+        for enumeration in &module.enums {
+            if !valid_identifier(&enumeration.name)
+                || enumeration.ty.width == 0
+                || enumeration.ty.signed
+                || enumeration.members.is_empty()
+                || !enum_names.insert(enumeration.name.to_ascii_lowercase())
+            {
+                return Err(HardwareError::InvalidModule);
+            }
+            let mut values = HashSet::new();
+            for member in &enumeration.members {
+                if !valid_identifier(&member.name)
+                    || !declaration_names.insert(member.name.to_ascii_lowercase())
+                    || !values.insert(member.value)
+                    || !fits(member.value, enumeration.ty)
+                {
+                    return Err(HardwareError::InvalidModule);
+                }
+            }
+        }
+        for register in &module.registers {
+            if !module.ports.iter().any(|port| port.name == register.name)
+                && !declaration_names.insert(register.name.to_ascii_lowercase())
+            {
+                return Err(HardwareError::InvalidModule);
+            }
+        }
         let mut assigned = HashSet::new();
         for assignment in &module.assignments {
             let port = module
@@ -1254,6 +1616,35 @@ fn verify_stmt(
             updates.extend(else_updates);
             Ok(())
         }
+        HwStmt::Case {
+            selector,
+            arms,
+            default,
+            ..
+        } => {
+            verify_hardware_expr(selector, module)?;
+            if arms.is_empty() {
+                return Err(HardwareError::InvalidModule);
+            }
+            let mut keys = HashSet::new();
+            let mut merged = updates.clone();
+            for arm in arms {
+                let (ty, value) = case_key_type_value(&arm.key, module)?;
+                if ty != selector.ty || !keys.insert(value) {
+                    return Err(HardwareError::TypeMismatch);
+                }
+                let mut branch = updates.clone();
+                verify_stmt(&arm.body, module, &mut branch)?;
+                merged.extend(branch);
+            }
+            if let Some(default) = default {
+                let mut branch = updates.clone();
+                verify_stmt(default, module, &mut branch)?;
+                merged.extend(branch);
+            }
+            *updates = merged;
+            Ok(())
+        }
     }
 }
 fn emit_stmt(statement: &HwStmt, module: &HwModule, indent: usize, out: &mut String) {
@@ -1288,12 +1679,38 @@ fn emit_stmt(statement: &HwStmt, module: &HwModule, indent: usize, out: &mut Str
             }
             out.push('\n');
         }
+        HwStmt::Case {
+            selector,
+            arms,
+            default,
+            ..
+        } => {
+            out.push_str(&format!(
+                "{padding}case ({})\n",
+                emit_expr(selector, module)
+            ));
+            for arm in arms {
+                out.push_str(&format!(
+                    "{padding}    {}: begin\n",
+                    emit_case_key(&arm.key, module)
+                ));
+                emit_stmt(&arm.body, module, indent + 2, out);
+                out.push_str(&format!("{padding}    end\n"));
+            }
+            if let Some(default) = default {
+                out.push_str(&format!("{padding}    default: begin\n"));
+                emit_stmt(default, module, indent + 2, out);
+                out.push_str(&format!("{padding}    end\n"));
+            }
+            out.push_str(&format!("{padding}endcase\n"));
+        }
     }
 }
 
 fn collect_references(expr: &HwExpr, references: &mut Vec<HwSignalId>) {
     match &expr.kind {
         HwExprKind::Reference(reference) => references.push(reference.id),
+        HwExprKind::EnumMember(_) => {}
         HwExprKind::Constant(_) => {}
         HwExprKind::Unary { operand, .. } => collect_references(operand, references),
         HwExprKind::Binary { lhs, rhs, .. } => {
@@ -1312,6 +1729,17 @@ fn collect_references(expr: &HwExpr, references: &mut Vec<HwSignalId>) {
             collect_references(condition, references);
             collect_references(then_expr, references);
             collect_references(else_expr, references);
+        }
+        HwExprKind::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            collect_references(selector, references);
+            for arm in arms {
+                collect_references(&arm.value, references);
+            }
+            collect_references(default, references);
         }
     }
 }
@@ -1337,6 +1765,18 @@ fn verify_hardware_expr(expr: &HwExpr, module: &HwModule) -> Result<(), Hardware
                 Err(HardwareError::TypeMismatch)
             }
         }
+        HwExprKind::EnumMember(id) => module
+            .enums
+            .get(id.enum_id.0)
+            .and_then(|enumeration| {
+                enumeration
+                    .members
+                    .get(id.member_index)
+                    .map(|_| enumeration.ty)
+            })
+            .filter(|ty| *ty == expr.ty)
+            .map(|_| ())
+            .ok_or(HardwareError::TypeMismatch),
         HwExprKind::Constant(value) if fits(*value, expr.ty) => Ok(()),
         HwExprKind::Constant(value) => Err(HardwareError::ConstantOutOfRange(*value)),
         HwExprKind::Unary { operand, .. } => {
@@ -1386,6 +1826,29 @@ fn verify_hardware_expr(expr: &HwExpr, module: &HwModule) -> Result<(), Hardware
                 Err(HardwareError::TypeMismatch)
             }
         }
+        HwExprKind::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            verify_hardware_expr(selector, module)?;
+            verify_hardware_expr(default, module)?;
+            if arms.is_empty() || default.ty != expr.ty {
+                return Err(HardwareError::TypeMismatch);
+            }
+            let mut keys = HashSet::new();
+            for arm in arms {
+                verify_hardware_expr(&arm.value, module)?;
+                if arm.value.ty != expr.ty {
+                    return Err(HardwareError::TypeMismatch);
+                }
+                let (ty, value) = case_key_type_value(&arm.key, module)?;
+                if ty != selector.ty || !keys.insert(value) {
+                    return Err(HardwareError::TypeMismatch);
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1424,6 +1887,21 @@ pub fn emit_systemverilog(design: &HwDesign) -> Result<String, HardwareError> {
             ))
         }
         out.push_str(");\n\n");
+        for enumeration in &module.enums {
+            for member in &enumeration.members {
+                out.push_str("localparam logic");
+                if enumeration.ty.width > 1 {
+                    out.push_str(&format!(" [{}:0]", enumeration.ty.width - 1));
+                }
+                out.push_str(&format!(
+                    " {} = {}'d{};\n",
+                    member.name, enumeration.ty.width, member.value
+                ));
+            }
+        }
+        if !module.enums.is_empty() {
+            out.push('\n');
+        }
         for register in &module.registers {
             if module
                 .ports
@@ -1442,6 +1920,22 @@ pub fn emit_systemverilog(design: &HwDesign) -> Result<String, HardwareError> {
             out.push_str(&format!(" {};\n", register.name));
         }
         if !module.registers.is_empty() {
+            out.push('\n');
+        }
+        for assignment in &module.assignments {
+            out.push_str(&format!(
+                "assign {} = {};\n",
+                signal_name(module, assignment.destination.id),
+                emit_expr(&assignment.value, module)
+            ));
+        }
+        if !module.assignments.is_empty()
+            && (module
+                .registers
+                .iter()
+                .any(|register| register.clock.0 != usize::MAX)
+                || !module.clocked_blocks.is_empty())
+        {
             out.push('\n');
         }
         for register in &module.registers {
@@ -1509,13 +2003,6 @@ pub fn emit_systemverilog(design: &HwDesign) -> Result<String, HardwareError> {
             emit_stmt(&block.body, module, 1, &mut out);
             out.push_str("end\n\n");
         }
-        for assignment in &module.assignments {
-            out.push_str(&format!(
-                "assign {} = {};\n",
-                signal_name(module, assignment.destination.id),
-                emit_expr(&assignment.value, module)
-            ))
-        }
         out.push_str("\nendmodule\n")
     }
     Ok(out)
@@ -1523,6 +2010,9 @@ pub fn emit_systemverilog(design: &HwDesign) -> Result<String, HardwareError> {
 fn emit_expr(expr: &HwExpr, module: &HwModule) -> String {
     match &expr.kind {
         HwExprKind::Reference(r) => signal_name(module, r.id).to_string(),
+        HwExprKind::EnumMember(id) => module.enums[id.enum_id.0].members[id.member_index]
+            .name
+            .clone(),
         HwExprKind::Constant(v) => {
             if *v < 0 {
                 format!(
@@ -1576,6 +2066,43 @@ fn emit_expr(expr: &HwExpr, module: &HwModule) -> String {
             emit_expr(then_expr, module),
             emit_expr(else_expr, module)
         ),
+        HwExprKind::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            let mut result = emit_expr(default, module);
+            for arm in arms.iter().rev() {
+                result = format!(
+                    "(({} == {}) ? {} : {})",
+                    emit_expr(selector, module),
+                    emit_case_key(&arm.key, module),
+                    emit_expr(&arm.value, module),
+                    result
+                );
+            }
+            result
+        }
+    }
+}
+
+fn case_key_type_value(key: &HwCaseKey, module: &HwModule) -> Result<(HwType, i64), HardwareError> {
+    match key {
+        HwCaseKey::Constant { value, ty } if fits(*value, *ty) => Ok((*ty, *value)),
+        HwCaseKey::Constant { value, .. } => Err(HardwareError::ConstantOutOfRange(*value)),
+        HwCaseKey::EnumMember(id) => module
+            .enums
+            .get(id.enum_id.0)
+            .and_then(|e| e.members.get(id.member_index).map(|m| (e.ty, m.value)))
+            .ok_or(HardwareError::InvalidModule),
+    }
+}
+fn emit_case_key(key: &HwCaseKey, module: &HwModule) -> String {
+    match key {
+        HwCaseKey::Constant { value, ty } => format!("{}'d{}", ty.width, value),
+        HwCaseKey::EnumMember(id) => module.enums[id.enum_id.0].members[id.member_index]
+            .name
+            .clone(),
     }
 }
 
