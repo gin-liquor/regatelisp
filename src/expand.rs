@@ -146,7 +146,7 @@ fn expand_list(
                 });
             };
             return Ok(CoreExpr::with_properties(
-                CoreExprKind::QuasiQuote(expand_quasi_datum(template, context, 1)?),
+                CoreExprKind::QuasiQuote(expand_quasi_datum(template, context, 1, false)?),
                 source.properties().clone(),
             ));
         }
@@ -157,6 +157,14 @@ fn expand_list(
                 });
             }
             return Err(ExpandError::UnquoteOutsideQuasiquote);
+        }
+        if name == "unquote-splicing" {
+            if items.len() != 2 {
+                return Err(ExpandError::InvalidUnquoteSplicingSyntax {
+                    got: items.len() - 1,
+                });
+            }
+            return Err(ExpandError::UnquoteSplicingOutsideQuasiquote);
         }
     }
 
@@ -174,6 +182,7 @@ fn expand_quasi_datum(
     expression: &Expr,
     context: &ExpansionContext,
     depth: usize,
+    list_element: bool,
 ) -> Result<QuasiDatum, ExpandError> {
     let ExprKind::List(items) = expression.kind() else {
         return Ok(QuasiDatum::Datum(expr_to_datum(expression)));
@@ -193,7 +202,7 @@ fn expand_quasi_datum(
                 };
                 return Ok(QuasiDatum::List(vec![
                     QuasiDatum::Datum(Datum::Symbol(crate::symbol::Symbol::interned("quasiquote"))),
-                    expand_quasi_datum(template, context, depth + 1)?,
+                    expand_quasi_datum(template, context, depth + 1, true)?,
                 ]));
             }
             "unquote" => {
@@ -207,7 +216,26 @@ fn expand_quasi_datum(
                 }
                 return Ok(QuasiDatum::List(vec![
                     QuasiDatum::Datum(Datum::Symbol(crate::symbol::Symbol::interned("unquote"))),
-                    expand_quasi_datum(value, context, depth - 1)?,
+                    expand_quasi_datum(value, context, depth - 1, true)?,
+                ]));
+            }
+            "unquote-splicing" => {
+                let [value] = &items[1..] else {
+                    return Err(ExpandError::InvalidUnquoteSplicingSyntax {
+                        got: items.len() - 1,
+                    });
+                };
+                if depth == 1 {
+                    if !list_element {
+                        return Err(ExpandError::UnquoteSplicingWithoutListContext);
+                    }
+                    return Ok(QuasiDatum::Splice(Box::new(expand(value, context)?)));
+                }
+                return Ok(QuasiDatum::List(vec![
+                    QuasiDatum::Datum(Datum::Symbol(crate::symbol::Symbol::interned(
+                        "unquote-splicing",
+                    ))),
+                    expand_quasi_datum(value, context, depth - 1, true)?,
                 ]));
             }
             _ => {}
@@ -216,7 +244,7 @@ fn expand_quasi_datum(
     Ok(QuasiDatum::List(
         items
             .iter()
-            .map(|item| expand_quasi_datum(item, context, depth))
+            .map(|item| expand_quasi_datum(item, context, depth, true))
             .collect::<Result<_, _>>()?,
     ))
 }

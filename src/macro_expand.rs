@@ -10,6 +10,7 @@ use crate::value::Value;
 
 const MAX_EXPANSION_DEPTH: usize = 256;
 const MAX_MACRO_INVOCATIONS: usize = 10_000;
+const MAX_GENERATED_DATUM_NODES: usize = 1_000_000;
 const RESERVED_MACRO_NAMES: &[&str] = &[
     "fn",
     "let",
@@ -22,7 +23,9 @@ const RESERVED_MACRO_NAMES: &[&str] = &[
     "quote",
     "quasiquote",
     "unquote",
+    "unquote-splicing",
     "gensym",
+    "do",
     "meta",
     "true",
     "false",
@@ -31,9 +34,15 @@ const RESERVED_MACRO_NAMES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct MacroDef {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: MacroParams,
     pub body: Expr,
     pub properties: Properties,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroParams {
+    pub fixed: Vec<String>,
+    pub rest: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +62,7 @@ pub struct MacroExpansionSession {
     invocations: usize,
     stack: Vec<MacroExpansionFrame>,
     limits: MacroExpansionLimits,
+    generated_datum_nodes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +76,7 @@ pub struct MacroExpansionFrame {
 pub struct MacroExpansionLimits {
     pub max_depth: usize,
     pub max_invocations: usize,
+    pub max_generated_datum_nodes: usize,
 }
 
 impl Default for MacroExpansionLimits {
@@ -73,6 +84,7 @@ impl Default for MacroExpansionLimits {
         Self {
             max_depth: MAX_EXPANSION_DEPTH,
             max_invocations: MAX_MACRO_INVOCATIONS,
+            max_generated_datum_nodes: MAX_GENERATED_DATUM_NODES,
         }
     }
 }
@@ -89,6 +101,7 @@ impl MacroExpansionSession {
             invocations: 0,
             stack: Vec::new(),
             limits,
+            generated_datum_nodes: 0,
         }
     }
 
@@ -180,7 +193,7 @@ impl MacroExpansionSession {
             if name == "quote" {
                 return Ok(expression.clone());
             }
-            if name == "unquote" && quasiquote_depth == 1 {
+            if matches!(name.as_str(), "unquote" | "unquote-splicing") && quasiquote_depth == 1 {
                 let mut result = expression.clone();
                 if let ExprKind::List(result_items) = result.kind_mut()
                     && let Some(value) = result_items.get_mut(1)
@@ -195,7 +208,11 @@ impl MacroExpansionSession {
         if let ExprKind::List(result_items) = result.kind_mut() {
             let nested_depth = match items.first().map(Expr::kind) {
                 Some(ExprKind::Symbol(name)) if name == "quasiquote" => quasiquote_depth + 1,
-                Some(ExprKind::Symbol(name)) if name == "unquote" => quasiquote_depth - 1,
+                Some(ExprKind::Symbol(name))
+                    if matches!(name.as_str(), "unquote" | "unquote-splicing") =>
+                {
+                    quasiquote_depth - 1
+                }
                 _ => quasiquote_depth,
             };
             for item in result_items {
@@ -212,10 +229,17 @@ impl MacroExpansionSession {
         arguments: &[Expr],
         depth: usize,
     ) -> Result<Expr, MacroExpandError> {
-        if arguments.len() != definition.params.len() {
+        if definition.params.rest.is_none() && arguments.len() != definition.params.fixed.len() {
             return Err(MacroExpandError::MacroArityMismatch {
                 name: definition.name.clone(),
-                expected: definition.params.len(),
+                expected: definition.params.fixed.len(),
+                got: arguments.len(),
+            });
+        }
+        if definition.params.rest.is_some() && arguments.len() < definition.params.fixed.len() {
+            return Err(MacroExpandError::MacroMinimumArityMismatch {
+                name: definition.name.clone(),
+                minimum: definition.params.fixed.len(),
                 got: arguments.len(),
             });
         }
@@ -238,10 +262,20 @@ impl MacroExpansionSession {
 
         let mut evaluator = Interpreter::new_compile_time(Vec::new());
         evaluator.set_next_gensym_id(self.next_gensym_id);
-        for (parameter, argument) in definition.params.iter().zip(arguments) {
+        for (parameter, argument) in definition.params.fixed.iter().zip(arguments) {
             evaluator.define_compile_time_binding(
                 parameter,
                 Value::Datum(Rc::new(expr_to_datum(argument))),
+            );
+        }
+        if let Some(rest) = &definition.params.rest {
+            let values = arguments[definition.params.fixed.len()..]
+                .iter()
+                .map(expr_to_datum)
+                .collect();
+            evaluator.define_compile_time_binding(
+                rest,
+                Value::Datum(Rc::new(crate::datum::Datum::List(values))),
             );
         }
 
@@ -277,6 +311,23 @@ impl MacroExpansionSession {
             return Err(error);
         };
 
+        let generated = count_datum_nodes(&datum);
+        self.generated_datum_nodes = self
+            .generated_datum_nodes
+            .checked_add(generated)
+            .ok_or_else(|| MacroExpandError::GeneratedDatumNodeLimitExceeded {
+                limit: self.limits.max_generated_datum_nodes,
+                stack: self.stack_names(),
+            })?;
+        if self.generated_datum_nodes > self.limits.max_generated_datum_nodes {
+            let error = MacroExpandError::GeneratedDatumNodeLimitExceeded {
+                limit: self.limits.max_generated_datum_nodes,
+                stack: self.stack_names(),
+            };
+            self.stack.pop();
+            return Err(error);
+        }
+
         let mut result = datum_to_expr(&datum);
         restore_argument_properties(&mut result, arguments);
         restore_template_properties(&mut result, &definition.body, &definition.params, arguments);
@@ -293,6 +344,15 @@ impl MacroExpansionSession {
             .iter()
             .map(|frame| frame.macro_name.clone())
             .collect()
+    }
+}
+
+fn count_datum_nodes(datum: &crate::datum::Datum) -> usize {
+    match datum {
+        crate::datum::Datum::List(items) => items.iter().fold(1usize, |total, item| {
+            total.saturating_add(count_datum_nodes(item))
+        }),
+        _ => 1,
     }
 }
 
@@ -333,21 +393,39 @@ fn parse_macro_definition(expression: &Expr) -> Result<Option<MacroDef>, MacroEx
     let ExprKind::List(param_exprs) = params_expr.kind() else {
         return Err(MacroExpandError::InvalidMacroParameterList);
     };
-    let mut params = Vec::with_capacity(param_exprs.len());
+    let mut fixed = Vec::with_capacity(param_exprs.len());
+    let mut rest = None;
     let mut seen = HashSet::new();
-    for parameter in param_exprs {
+    let mut index = 0;
+    while index < param_exprs.len() {
+        if matches!(param_exprs[index].kind(), ExprKind::Symbol(name) if name == "&rest") {
+            if rest.is_some() || index + 2 != param_exprs.len() {
+                return Err(MacroExpandError::InvalidMacroRestParameter);
+            }
+            let ExprKind::Symbol(rest_name) = param_exprs[index + 1].kind() else {
+                return Err(MacroExpandError::InvalidMacroRestParameter);
+            };
+            if rest_name == "&rest" || !seen.insert(rest_name.clone()) {
+                return Err(MacroExpandError::DuplicateMacroParameter(rest_name.clone()));
+            }
+            rest = Some(rest_name.clone());
+            index += 2;
+            continue;
+        }
+        let parameter = &param_exprs[index];
         let ExprKind::Symbol(parameter) = parameter.kind() else {
             return Err(MacroExpandError::InvalidMacroParameterList);
         };
         if !seen.insert(parameter.clone()) {
             return Err(MacroExpandError::DuplicateMacroParameter(parameter.clone()));
         }
-        params.push(parameter.clone());
+        fixed.push(parameter.clone());
+        index += 1;
     }
     reject_forbidden_macro_operations(body)?;
     Ok(Some(MacroDef {
         name: name.clone(),
-        params,
+        params: MacroParams { fixed, rest },
         body: body.clone(),
         properties: expression.properties().clone(),
     }))
@@ -377,7 +455,7 @@ fn reject_forbidden_at_depth(
             }
             return Ok(());
         }
-        if name == "unquote" && quasiquote_depth > 0 {
+        if matches!(name.as_str(), "unquote" | "unquote-splicing") && quasiquote_depth > 0 {
             for item in items.iter().skip(1) {
                 reject_forbidden_at_depth(item, quasiquote_depth - 1)?;
             }
@@ -416,7 +494,7 @@ fn reject_nested_macro_definition(
             }
             return Ok(());
         }
-        if name == "unquote" && quasiquote_depth > 0 {
+        if matches!(name.as_str(), "unquote" | "unquote-splicing") && quasiquote_depth > 0 {
             for item in items.iter().skip(1) {
                 reject_nested_macro_definition(item, quasiquote_depth - 1)?;
             }
@@ -448,7 +526,7 @@ fn restore_argument_properties(result: &mut Expr, arguments: &[Expr]) {
 fn restore_template_properties(
     result: &mut Expr,
     body: &Expr,
-    params: &[String],
+    params: &MacroParams,
     arguments: &[Expr],
 ) {
     let ExprKind::List(body_items) = body.kind() else {
@@ -466,7 +544,7 @@ fn restore_template_properties(
 fn restore_template_node(
     result: &mut Expr,
     template: &Expr,
-    params: &[String],
+    params: &MacroParams,
     arguments: &[Expr],
     depth: usize,
 ) {
@@ -475,7 +553,7 @@ fn restore_template_node(
         && depth == 1
     {
         if let Some(ExprKind::Symbol(parameter)) = template_items.get(1).map(Expr::kind)
-            && let Some(index) = params.iter().position(|name| name == parameter)
+            && let Some(index) = params.fixed.iter().position(|name| name == parameter)
         {
             copy_properties_recursively(result, &arguments[index]);
         }
@@ -492,12 +570,38 @@ fn restore_template_node(
     };
     let nested_depth = match template_items.first().map(Expr::kind) {
         Some(ExprKind::Symbol(name)) if name == "quasiquote" => depth + 1,
-        Some(ExprKind::Symbol(name)) if name == "unquote" && depth > 1 => depth - 1,
+        Some(ExprKind::Symbol(name))
+            if matches!(name.as_str(), "unquote" | "unquote-splicing") && depth > 1 =>
+        {
+            depth - 1
+        }
         _ => depth,
     };
-    for (result_item, template_item) in result_items.iter_mut().zip(template_items) {
-        restore_template_node(result_item, template_item, params, arguments, nested_depth);
+    let mut result_index = 0;
+    for template_item in template_items {
+        if is_active_rest_splice(template_item, params, depth) {
+            for argument in &arguments[params.fixed.len()..] {
+                if let Some(result_item) = result_items.get_mut(result_index) {
+                    copy_properties_recursively(result_item, argument);
+                }
+                result_index += 1;
+            }
+            continue;
+        }
+        if let Some(result_item) = result_items.get_mut(result_index) {
+            restore_template_node(result_item, template_item, params, arguments, nested_depth);
+        }
+        result_index += 1;
     }
+}
+
+fn is_active_rest_splice(template: &Expr, params: &MacroParams, depth: usize) -> bool {
+    let ExprKind::List(items) = template.kind() else {
+        return false;
+    };
+    depth == 1
+        && matches!(items.first().map(Expr::kind), Some(ExprKind::Symbol(name)) if name == "unquote-splicing")
+        && matches!(items.get(1).map(Expr::kind), Some(ExprKind::Symbol(name)) if params.rest.as_ref() == Some(name))
 }
 
 fn copy_properties_recursively(target: &mut Expr, source: &Expr) {
@@ -556,6 +660,7 @@ mod tests {
             MacroExpansionLimits {
                 max_depth: 4,
                 max_invocations: 100,
+                max_generated_datum_nodes: 1_000,
             },
         );
         let error = session.expand_program(&expressions).unwrap_err();
@@ -574,6 +679,7 @@ mod tests {
             MacroExpansionLimits {
                 max_depth: 100,
                 max_invocations: 2,
+                max_generated_datum_nodes: 1_000,
             },
         );
         assert!(matches!(

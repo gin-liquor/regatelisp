@@ -26,6 +26,7 @@ pub enum QuasiDatum {
     Datum(Datum),
     List(Vec<QuasiDatum>),
     Evaluate(Box<CoreExpr>),
+    Splice(Box<CoreExpr>),
 }
 
 impl CoreExpr {

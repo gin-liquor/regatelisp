@@ -37,7 +37,9 @@ const RESERVED_DEF_NAMES: &[&str] = &[
     "quote",
     "quasiquote",
     "unquote",
+    "unquote-splicing",
     "gensym",
+    "do",
     "true",
     "false",
 ];
@@ -408,6 +410,7 @@ fn lower_list(
             "break" => return lower_break(&items[1..], context, span),
             "loop" => return lower_loop(&items[1..], context, span),
             "gensym" => return lower_gensym(&items[1..], context, span),
+            "do" => return lower_do(&items[1..], context, span),
             "def" => return Err(LowerError::DefOutsideDirectTopLevel),
             _ => {}
         }
@@ -425,6 +428,18 @@ fn lower_list(
             arguments,
         },
     ))
+}
+
+fn lower_do(
+    expressions: &[CoreExpr],
+    context: &mut LowerContext,
+    span: Span,
+) -> Result<IrExpr, LowerError> {
+    let expressions = expressions
+        .iter()
+        .map(|expression| lower_expr(expression, context))
+        .collect::<Result<_, _>>()?;
+    Ok(IrExpr::new(span, IrExprKind::Do(expressions)))
 }
 
 fn lower_gensym(
@@ -454,6 +469,9 @@ fn lower_quasi_datum(
         ),
         QuasiDatum::Evaluate(expression) => {
             IrQuasiDatum::Evaluate(Box::new(lower_expr(expression, context)?))
+        }
+        QuasiDatum::Splice(expression) => {
+            IrQuasiDatum::Splice(Box::new(lower_expr(expression, context)?))
         }
     })
 }

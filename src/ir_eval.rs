@@ -26,6 +26,7 @@ pub struct Runtime<W: Write> {
     pub output: W,
     pub limits: RuntimeLimits,
     next_gensym_id: u64,
+    generated_datum_nodes: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,12 +36,14 @@ pub struct RuntimeLimits {
     /// interactive use. Not related to `for`'s separate expansion-time
     /// limit.
     pub max_loop_iterations: u64,
+    pub max_generated_datum_nodes: usize,
 }
 
 impl Default for RuntimeLimits {
     fn default() -> Self {
         RuntimeLimits {
             max_loop_iterations: 10_000_000,
+            max_generated_datum_nodes: 1_000_000,
         }
     }
 }
@@ -52,6 +55,7 @@ impl<W: Write> Runtime<W> {
             output,
             limits: RuntimeLimits::default(),
             next_gensym_id: 0,
+            generated_datum_nodes: 0,
         }
     }
 
@@ -71,6 +75,26 @@ impl<W: Write> Runtime<W> {
 
     pub(crate) fn set_next_gensym_id(&mut self, next: u64) {
         self.next_gensym_id = next;
+    }
+
+    fn charge_generated_datum(&mut self, datum: &Datum) -> Result<(), EvalError> {
+        self.generated_datum_nodes = self
+            .generated_datum_nodes
+            .checked_add(datum_node_count(datum))
+            .ok_or(EvalError::GeneratedDatumNodeLimitExceeded)?;
+        if self.generated_datum_nodes > self.limits.max_generated_datum_nodes {
+            return Err(EvalError::GeneratedDatumNodeLimitExceeded);
+        }
+        Ok(())
+    }
+}
+
+fn datum_node_count(datum: &Datum) -> usize {
+    match datum {
+        Datum::List(items) => items.iter().fold(1usize, |total, item| {
+            total.saturating_add(datum_node_count(item))
+        }),
+        _ => 1,
     }
 }
 
@@ -172,7 +196,13 @@ fn eval_expr<W: Write>(
     match &expr.kind {
         IrExprKind::Const(c) => Ok(Flow::Value(const_to_value(c))),
         IrExprKind::Quote(datum) => Ok(Flow::Value(Value::Datum(Rc::new(datum.clone())))),
-        IrExprKind::QuasiQuote(template) => eval_quasi_datum(template, frame, module, runtime),
+        IrExprKind::QuasiQuote(template) => {
+            let flow = eval_quasi_datum(template, frame, module, runtime)?;
+            if let Flow::Value(Value::Datum(datum)) = &flow {
+                runtime.charge_generated_datum(datum)?;
+            }
+            Ok(flow)
+        }
         IrExprKind::Gensym { prefix } => {
             let hint = if let Some(prefix) = prefix {
                 let value = match eval_expr(prefix, frame, module, runtime)? {
@@ -304,6 +334,16 @@ fn eval_expr<W: Write>(
             }
             Ok(Flow::Value(Value::Unit))
         }
+        IrExprKind::Do(items) => {
+            let mut result = Value::Unit;
+            for item in items {
+                match eval_expr(item, frame, module, runtime)? {
+                    Flow::Value(value) => result = value,
+                    flow @ Flow::Break { .. } => return Ok(flow),
+                }
+            }
+            Ok(Flow::Value(result))
+        }
     }
 }
 
@@ -318,6 +358,26 @@ fn eval_quasi_datum<W: Write>(
         IrQuasiDatum::List(items) => {
             let mut values = Vec::with_capacity(items.len());
             for item in items {
+                if let IrQuasiDatum::Splice(expression) = item {
+                    match eval_expr(expression, frame, module, runtime)? {
+                        Flow::Value(Value::Datum(datum)) => match datum.as_ref() {
+                            Datum::List(items) => values.extend(items.iter().cloned()),
+                            other => {
+                                return Err(EvalError::SpliceExpectedDatumList(datum_type_name(
+                                    other,
+                                ))
+                                .into());
+                            }
+                        },
+                        Flow::Value(value) => {
+                            return Err(
+                                EvalError::SpliceExpectedDatumList(value.type_name()).into()
+                            );
+                        }
+                        flow @ Flow::Break { .. } => return Ok(flow),
+                    }
+                    continue;
+                }
                 match eval_quasi_datum(item, frame, module, runtime)? {
                     Flow::Value(Value::Datum(datum)) => values.push(datum.as_ref().clone()),
                     flow @ Flow::Break { .. } => return Ok(flow),
@@ -339,15 +399,30 @@ fn eval_quasi_datum<W: Write>(
                 flow @ Flow::Break { .. } => Ok(flow),
             }
         }
+        IrQuasiDatum::Splice(_) => Err(EvalError::Io {
+            message: "internal IR error: splice outside quasiquote list".into(),
+        }
+        .into()),
     }
 }
 
-fn value_to_datum(value: Value) -> Result<Datum, EvalError> {
+pub(crate) fn value_to_datum(value: Value) -> Result<Datum, EvalError> {
     match value {
         Value::Int(value) => Ok(Datum::Integer(value)),
         Value::Bool(value) => Ok(Datum::Bool(value)),
+        Value::String(value) => Ok(Datum::String(value.as_ref().clone())),
         Value::Datum(datum) => Ok(datum.as_ref().clone()),
         other => Err(EvalError::CannotConvertToDatum(other.type_name())),
+    }
+}
+
+fn datum_type_name(datum: &Datum) -> &'static str {
+    match datum {
+        Datum::Integer(_) => "integer Datum",
+        Datum::Bool(_) => "boolean Datum",
+        Datum::String(_) => "string Datum",
+        Datum::Symbol(_) => "symbol Datum",
+        Datum::List(_) => "Datum list",
     }
 }
 
@@ -510,7 +585,13 @@ fn apply<W: Write>(
     runtime: &mut Runtime<W>,
 ) -> Result<Value, LispError> {
     match callee {
-        Value::Builtin(builtin) => Ok(apply_builtin(builtin, &arguments, &mut runtime.output)?),
+        Value::Builtin(builtin) => {
+            let value = apply_builtin(builtin, &arguments, &mut runtime.output)?;
+            if let Value::Datum(datum) = &value {
+                runtime.charge_generated_datum(datum)?;
+            }
+            Ok(value)
+        }
         Value::Closure(closure) => {
             let function = module.function(closure.function).ok_or_else(|| {
                 LispError::Eval(EvalError::Io {

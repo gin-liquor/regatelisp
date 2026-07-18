@@ -80,3 +80,28 @@ fn hardware_macros_example() {
     assert!(output.contains("module macro_adder"));
     assert!(output.contains("assign y = (a + 8'd1);"));
 }
+
+#[test]
+fn macro_splicing_example() {
+    let values = eval_example("examples/macro_splicing.lisp");
+    let rendered: Vec<String> = values.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        rendered,
+        [
+            "()",
+            "42",
+            "(alpha beta)",
+            "(first second third)",
+            "(outer (quasiquote (inner (unquote-splicing still-protected))) a b)",
+        ]
+    );
+}
+
+#[test]
+fn macro_clocked_systemverilog_example() {
+    let source = std::fs::read_to_string("examples/macro_clocked_sv.lisp").unwrap();
+    let output = regatelisp::compile_systemverilog(&source).unwrap();
+    assert!(output.contains("module macro_counter"));
+    assert!(output.contains("count <= (count + 8'd1);"));
+    assert!(output.contains("pulse <= count[0];"));
+}

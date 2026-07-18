@@ -248,6 +248,17 @@ fn format_expr_inline(
             indent(out, depth);
             out.push('}');
         }
+        IrExprKind::Do(items) => {
+            out.push_str("do {");
+            if !items.is_empty() {
+                out.push('\n');
+                for item in items {
+                    format_expr_line(out, item, module, globals, depth + 1);
+                }
+                indent(out, depth);
+            }
+            out.push('}');
+        }
     }
 }
 
@@ -274,6 +285,11 @@ fn format_quasi_datum(
         }
         IrQuasiDatum::Evaluate(expression) => {
             out.push_str("(evaluate ");
+            format_expr_inline(out, expression, module, globals, depth);
+            out.push(')');
+        }
+        IrQuasiDatum::Splice(expression) => {
+            out.push_str("(splice ");
             format_expr_inline(out, expression, module, globals, depth);
             out.push(')');
         }

@@ -349,7 +349,9 @@ fn contains_for_shaped_node(expr: &IrExpr) -> bool {
                 || contains_for_shaped_node(body)
         }
         IrExprKind::Break { value, .. } => value.as_deref().is_some_and(contains_for_shaped_node),
-        IrExprKind::Sequence(items) => items.iter().any(contains_for_shaped_node),
+        IrExprKind::Sequence(items) | IrExprKind::Do(items) => {
+            items.iter().any(contains_for_shaped_node)
+        }
     }
 }
 
@@ -357,7 +359,9 @@ fn contains_for_in_quasi_datum(template: &IrQuasiDatum) -> bool {
     match template {
         IrQuasiDatum::Datum(_) => false,
         IrQuasiDatum::List(items) => items.iter().any(contains_for_in_quasi_datum),
-        IrQuasiDatum::Evaluate(expression) => contains_for_shaped_node(expression),
+        IrQuasiDatum::Evaluate(expression) | IrQuasiDatum::Splice(expression) => {
+            contains_for_shaped_node(expression)
+        }
     }
 }
 

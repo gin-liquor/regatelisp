@@ -117,6 +117,7 @@ pub enum IrExprKind {
     },
 
     Sequence(Vec<IrExpr>),
+    Do(Vec<IrExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +125,7 @@ pub enum IrQuasiDatum {
     Datum(Datum),
     List(Vec<IrQuasiDatum>),
     Evaluate(Box<IrExpr>),
+    Splice(Box<IrExpr>),
 }
 
 /// The body of a function or a top-level expression: a `local_count`-sized

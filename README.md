@@ -173,8 +173,8 @@ interpreter starts deterministically at `g__g0`. Datum conversion is structural,
 does not reparse text, and intentionally drops syntax properties.
 
 Only the full S-expression forms are supported; reader abbreviations such as
-quote/backquote/comma and `unquote-splicing` are not implemented. Syntax-object
-and property manipulation APIs remain out of scope.
+quote/backquote/comma are not implemented. Syntax-object and property manipulation
+APIs remain out of scope.
 
 ```powershell
 Get-Content -Raw examples/quasiquote.lisp | cargo run --quiet
@@ -209,5 +209,55 @@ definition operations are unavailable. Expansion is bounded by a depth limit of
 Get-Content -Raw examples/macros.lisp | cargo run --quiet
 
 Get-Content -Raw examples/macros_sv.lisp |
+    cargo run --quiet -- --emit-systemverilog
+```
+
+## Variadic and splicing macros (Stage 10)
+
+`defmacro` supports a final `&rest` parameter. It receives all remaining,
+unevaluated arguments as a proper Datum list. At the active quasiquote depth,
+`unquote-splicing` inserts every element of such a list into its parent list:
+
+```lisp
+(defmacro begin (&rest forms)
+  (quasiquote
+    (do
+      (unquote-splicing forms))))
+
+(begin
+  (+ 1 2)
+  (+ 20 22))
+```
+
+Macro code can construct and inspect Datum lists using `list`, `cons`, `car`,
+`cdr`, `append`, `null?`, `pair?`, and `list?`:
+
+```lisp
+(defmacro invoke (operator &rest operands)
+  (cons operator operands))
+
+(invoke + 20 22)
+```
+
+Splicing also works for existing hardware statements:
+
+```lisp
+(defmacro clocked-rising (clk &rest statements)
+  (quasiquote
+    (clocked
+      (clock (unquote clk) rising)
+      (unquote-splicing statements))))
+```
+
+Only proper lists are supported; dotted and improper lists are not introduced.
+`&rest` applies to `defmacro` only, not ordinary `fn`. The language uses the full
+S-expression `(unquote-splicing value)` form and does not support the `,@`
+reader shorthand. Macros are not automatically hygienic; use `gensym` for names
+that must not capture user bindings.
+
+```powershell
+Get-Content -Raw examples/macro_splicing.lisp | cargo run --quiet
+
+Get-Content -Raw examples/macro_clocked_sv.lisp |
     cargo run --quiet -- --emit-systemverilog
 ```

@@ -46,6 +46,7 @@ pub use ir::IrModule;
 pub use lexer::{SpannedToken, Token};
 pub use macro_expand::{
     MacroDef, MacroEnv, MacroExpansionFrame, MacroExpansionLimits, MacroExpansionSession,
+    MacroParams,
 };
 pub use property::{Properties, PropertyValue};
 pub use symbol::{GensymId, Symbol};

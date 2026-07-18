@@ -23,6 +23,14 @@ pub enum Builtin {
     Le,
     Gt,
     Ge,
+    List,
+    Cons,
+    Car,
+    Cdr,
+    Append,
+    NullP,
+    PairP,
+    ListP,
     Print,
 }
 
@@ -40,6 +48,14 @@ impl Builtin {
             Builtin::Le => "<=",
             Builtin::Gt => ">",
             Builtin::Ge => ">=",
+            Builtin::List => "list",
+            Builtin::Cons => "cons",
+            Builtin::Car => "car",
+            Builtin::Cdr => "cdr",
+            Builtin::Append => "append",
+            Builtin::NullP => "null?",
+            Builtin::PairP => "pair?",
+            Builtin::ListP => "list?",
             Builtin::Print => "print",
         }
     }
@@ -59,7 +75,11 @@ impl Builtin {
             | Builtin::Le
             | Builtin::Gt
             | Builtin::Ge => Some(2),
-            Builtin::Print => None,
+            Builtin::Cons => Some(2),
+            Builtin::Car | Builtin::Cdr | Builtin::NullP | Builtin::PairP | Builtin::ListP => {
+                Some(1)
+            }
+            Builtin::List | Builtin::Append | Builtin::Print => None,
         }
     }
 }

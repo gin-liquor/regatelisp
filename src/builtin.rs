@@ -3,7 +3,9 @@
 //! the interpreter's output target; the others ignore it.
 
 use std::io::Write;
+use std::rc::Rc;
 
+use crate::datum::Datum;
 use crate::error::EvalError;
 use crate::format::{parse_format_string, render};
 use crate::value::{Builtin, Value};
@@ -30,8 +32,102 @@ pub fn apply_builtin(
         Builtin::Rem => remainder(args),
         Builtin::Eq | Builtin::Ne => equality(builtin, args),
         Builtin::Lt | Builtin::Le | Builtin::Gt | Builtin::Ge => ordering(builtin, args),
+        Builtin::List => datum_list(args),
+        Builtin::Cons => datum_cons(args),
+        Builtin::Car => datum_car(args),
+        Builtin::Cdr => datum_cdr(args),
+        Builtin::Append => datum_append(args),
+        Builtin::NullP => Ok(Value::Bool(matches!(
+            args[0],
+            Value::Datum(ref datum) if matches!(datum.as_ref(), Datum::List(items) if items.is_empty())
+        ))),
+        Builtin::PairP => Ok(Value::Bool(matches!(
+            args[0],
+            Value::Datum(ref datum) if matches!(datum.as_ref(), Datum::List(items) if !items.is_empty())
+        ))),
+        Builtin::ListP => Ok(Value::Bool(matches!(
+            args[0],
+            Value::Datum(ref datum) if matches!(datum.as_ref(), Datum::List(_))
+        ))),
         Builtin::Print => print(args, output),
     }
+}
+
+fn datum_list(args: &[Value]) -> Result<Value, EvalError> {
+    let items = args
+        .iter()
+        .enumerate()
+        .map(|(index, value)| datum_value_argument("list", index, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Datum(Rc::new(Datum::List(items))))
+}
+
+fn datum_cons(args: &[Value]) -> Result<Value, EvalError> {
+    let head = datum_value_argument("cons", 0, &args[0])?;
+    let mut tail = datum_list_argument("cons", 1, &args[1])?.to_vec();
+    tail.insert(0, head);
+    Ok(Value::Datum(Rc::new(Datum::List(tail))))
+}
+
+fn datum_value_argument(
+    primitive: &'static str,
+    argument: usize,
+    value: &Value,
+) -> Result<Datum, EvalError> {
+    crate::ir_eval::value_to_datum(value.clone()).map_err(|_| {
+        EvalError::DatumPrimitiveTypeMismatch {
+            primitive,
+            argument,
+            expected: "Datum-convertible value",
+            actual: value.type_name(),
+        }
+    })
+}
+
+fn datum_car(args: &[Value]) -> Result<Value, EvalError> {
+    let items = datum_list_argument("car", 0, &args[0])?;
+    let first = items
+        .first()
+        .ok_or(EvalError::DatumPrimitiveEmptyList("car"))?;
+    Ok(Value::Datum(Rc::new(first.clone())))
+}
+
+fn datum_cdr(args: &[Value]) -> Result<Value, EvalError> {
+    let items = datum_list_argument("cdr", 0, &args[0])?;
+    if items.is_empty() {
+        return Err(EvalError::DatumPrimitiveEmptyList("cdr"));
+    }
+    Ok(Value::Datum(Rc::new(Datum::List(items[1..].to_vec()))))
+}
+
+fn datum_append(args: &[Value]) -> Result<Value, EvalError> {
+    let mut result = Vec::new();
+    for (index, argument) in args.iter().enumerate() {
+        result.extend(
+            datum_list_argument("append", index, argument)?
+                .iter()
+                .cloned(),
+        );
+    }
+    Ok(Value::Datum(Rc::new(Datum::List(result))))
+}
+
+fn datum_list_argument<'a>(
+    primitive: &'static str,
+    argument: usize,
+    value: &'a Value,
+) -> Result<&'a [Datum], EvalError> {
+    if let Value::Datum(datum) = value
+        && let Datum::List(items) = datum.as_ref()
+    {
+        return Ok(items);
+    }
+    Err(EvalError::DatumPrimitiveTypeMismatch {
+        primitive,
+        argument,
+        expected: "proper Datum list",
+        actual: value.type_name(),
+    })
 }
 
 fn equality(op: Builtin, args: &[Value]) -> Result<Value, EvalError> {
@@ -138,6 +234,14 @@ pub fn all() -> Vec<(&'static str, Value)> {
         Builtin::Le,
         Builtin::Gt,
         Builtin::Ge,
+        Builtin::List,
+        Builtin::Cons,
+        Builtin::Car,
+        Builtin::Cdr,
+        Builtin::Append,
+        Builtin::NullP,
+        Builtin::PairP,
+        Builtin::ListP,
         Builtin::Print,
     ]
     .into_iter()

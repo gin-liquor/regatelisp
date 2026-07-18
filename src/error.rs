@@ -139,6 +139,15 @@ pub enum EvalError {
     CannotConvertToDatum(&'static str),
     InvalidGensymPrefix(&'static str),
     GensymIdOverflow,
+    SpliceExpectedDatumList(&'static str),
+    DatumPrimitiveTypeMismatch {
+        primitive: &'static str,
+        argument: usize,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    DatumPrimitiveEmptyList(&'static str),
+    GeneratedDatumNodeLimitExceeded,
 }
 
 impl fmt::Display for EvalError {
@@ -203,6 +212,26 @@ impl fmt::Display for EvalError {
                 )
             }
             EvalError::GensymIdOverflow => write!(f, "gensym ID overflow"),
+            EvalError::SpliceExpectedDatumList(actual) => write!(
+                f,
+                "unquote-splicing requires a proper Datum list, got {actual}"
+            ),
+            EvalError::DatumPrimitiveTypeMismatch {
+                primitive,
+                argument,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{primitive} argument {} requires {expected}, got {actual}",
+                argument + 1
+            ),
+            EvalError::DatumPrimitiveEmptyList(primitive) => {
+                write!(f, "{primitive} requires a non-empty Datum list")
+            }
+            EvalError::GeneratedDatumNodeLimitExceeded => {
+                write!(f, "generated Datum node limit exceeded")
+            }
         }
     }
 }
@@ -276,6 +305,9 @@ pub enum ExpandError {
     InvalidQuasiquoteSyntax { got: usize },
     InvalidUnquoteSyntax { got: usize },
     UnquoteOutsideQuasiquote,
+    InvalidUnquoteSplicingSyntax { got: usize },
+    UnquoteSplicingOutsideQuasiquote,
+    UnquoteSplicingWithoutListContext,
 }
 
 impl fmt::Display for ExpandError {
@@ -330,6 +362,15 @@ impl fmt::Display for ExpandError {
             }
             ExpandError::UnquoteOutsideQuasiquote => {
                 write!(f, "unquote may only be used inside quasiquote")
+            }
+            ExpandError::InvalidUnquoteSplicingSyntax { got } => {
+                write!(f, "unquote-splicing expects exactly 1 argument, got {got}")
+            }
+            ExpandError::UnquoteSplicingOutsideQuasiquote => {
+                write!(f, "unquote-splicing may only be used inside quasiquote")
+            }
+            ExpandError::UnquoteSplicingWithoutListContext => {
+                write!(f, "unquote-splicing requires a parent quasiquote list")
             }
         }
     }
@@ -399,6 +440,7 @@ pub enum VerifyError {
     BreakTargetNotEnclosing(LoopId),
     InvalidStateLoopUpdate,
     InvalidParameterCount,
+    InvalidQuasiquoteSplicePlacement,
 }
 
 impl fmt::Display for VerifyError {
@@ -421,6 +463,9 @@ impl fmt::Display for VerifyError {
             }
             VerifyError::InvalidParameterCount => {
                 write!(f, "function parameter count exceeds its local count")
+            }
+            VerifyError::InvalidQuasiquoteSplicePlacement => {
+                write!(f, "quasiquote splice is not in a list element position")
             }
         }
     }
@@ -473,6 +518,7 @@ pub enum MacroExpandError {
     InvalidMacroDefinition,
     InvalidMacroName,
     InvalidMacroParameterList,
+    InvalidMacroRestParameter,
     DuplicateMacroParameter(String),
     DuplicateMacroDefinition(String),
     ReservedMacroName(String),
@@ -482,6 +528,11 @@ pub enum MacroExpandError {
     MacroArityMismatch {
         name: String,
         expected: usize,
+        got: usize,
+    },
+    MacroMinimumArityMismatch {
+        name: String,
+        minimum: usize,
         got: usize,
     },
     MacroEvaluationFailed {
@@ -501,6 +552,10 @@ pub enum MacroExpandError {
         stack: Vec<String>,
     },
     InvalidDatumToExprConversion,
+    GeneratedDatumNodeLimitExceeded {
+        limit: usize,
+        stack: Vec<String>,
+    },
 }
 
 impl fmt::Display for MacroExpandError {
@@ -511,6 +566,10 @@ impl fmt::Display for MacroExpandError {
             Self::InvalidMacroParameterList => {
                 write!(f, "macro parameters must be a list of interned symbols")
             }
+            Self::InvalidMacroRestParameter => write!(
+                f,
+                "&rest must be followed by one final, unique macro parameter"
+            ),
             Self::DuplicateMacroParameter(name) => write!(f, "duplicate macro parameter: {name}"),
             Self::DuplicateMacroDefinition(name) => write!(f, "duplicate macro definition: {name}"),
             Self::ReservedMacroName(name) => write!(
@@ -533,6 +592,10 @@ impl fmt::Display for MacroExpandError {
                 expected,
                 got,
             } => write!(f, "macro {name} expects {expected} arguments, got {got}"),
+            Self::MacroMinimumArityMismatch { name, minimum, got } => write!(
+                f,
+                "macro {name} expects at least {minimum} arguments because it has &rest, got {got}"
+            ),
             Self::MacroEvaluationFailed { name, cause, stack } => write!(
                 f,
                 "macro {name} evaluation failed (stack: {}): {cause}",
@@ -560,6 +623,11 @@ impl fmt::Display for MacroExpandError {
             Self::InvalidDatumToExprConversion => {
                 write!(f, "macro result cannot be converted from Datum to syntax")
             }
+            Self::GeneratedDatumNodeLimitExceeded { limit, stack } => write!(
+                f,
+                "generated Datum node limit of {limit} exceeded (stack: {})",
+                stack.join(" -> ")
+            ),
         }
     }
 }

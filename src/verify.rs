@@ -85,6 +85,7 @@ fn verify_expr(
         IrExprKind::Const(_) | IrExprKind::Quote(_) => Ok(()),
         IrExprKind::QuasiQuote(template) => verify_quasi_datum(
             template,
+            false,
             local_count,
             capture_count,
             module,
@@ -341,7 +342,7 @@ fn verify_expr(
             }
             Ok(())
         }
-        IrExprKind::Sequence(items) => {
+        IrExprKind::Sequence(items) | IrExprKind::Do(items) => {
             for item in items {
                 verify_expr(
                     item,
@@ -359,6 +360,7 @@ fn verify_expr(
 
 fn verify_quasi_datum(
     template: &IrQuasiDatum,
+    list_element: bool,
     local_count: u32,
     capture_count: u32,
     module: &IrModule,
@@ -371,6 +373,7 @@ fn verify_quasi_datum(
             for item in items {
                 verify_quasi_datum(
                     item,
+                    true,
                     local_count,
                     capture_count,
                     module,
@@ -388,5 +391,18 @@ fn verify_quasi_datum(
             globals,
             enclosing_loops,
         ),
+        IrQuasiDatum::Splice(expression) => {
+            if !list_element {
+                return Err(VerifyError::InvalidQuasiquoteSplicePlacement);
+            }
+            verify_expr(
+                expression,
+                local_count,
+                capture_count,
+                module,
+                globals,
+                enclosing_loops,
+            )
+        }
     }
 }
